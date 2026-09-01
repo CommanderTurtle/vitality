@@ -1,0 +1,8 @@
+{
+  "name": "configured-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "node legacy-server.js"
+  }
+}
