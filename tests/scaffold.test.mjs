@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -12,44 +11,28 @@ const cli = path.join(repository, "dist", "cli.js");
 const fixtures = path.join(repository, "tests", "fixtures");
 
 function run(command, arguments_, cwd) {
-  const result = spawnSync(command, arguments_, {
-    cwd,
-    encoding: "utf8",
-    windowsHide: true,
-  });
+  const result = spawnSync(command, arguments_, { cwd, encoding: "utf8", windowsHide: true });
   if (result.status !== 0) {
     throw new Error(`${command} ${arguments_.join(" ")} failed\n${result.stdout}\n${result.stderr}`);
   }
   return result;
 }
 
-async function freePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = typeof address === "object" && address ? address.port : 0;
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
-async function waitForPage(url, child) {
-  for (let attempt = 0; attempt < 80; attempt += 1) {
-    if (child.exitCode !== null) throw new Error(`development server exited with ${child.exitCode}`);
-    try {
-      const response = await fetch(url);
-      if (response.ok) return response.text();
-    } catch {
-      // The server has not bound its socket yet.
+async function allFiles(directory) {
+  const result = [];
+  const pending = [directory];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const absolute = path.join(current, entry.name);
+      if (entry.isDirectory()) pending.push(absolute);
+      else if (entry.isFile()) result.push(path.relative(directory, absolute).split(path.sep).join("/"));
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`development server did not answer ${url}`);
+  return result.sort();
 }
 
-test("give produces an unbuilt, runnable wrapper and honors infinite inlining", { timeout: 30_000 }, async (context) => {
+test("give creates an uninstalled TypeScript/Vite source project", { timeout: 30_000 }, async (context) => {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "vitality [literal] "));
   context.after(() => rm(temporaryRoot, { recursive: true, force: true }));
   const source = path.join(temporaryRoot, "source + regex[.]safe");
@@ -60,71 +43,82 @@ test("give produces an unbuilt, runnable wrapper and honors infinite inlining", 
   );
 
   const created = run(process.execPath, [
-    cli, "give", "--dir", source, "--base", "/project", "--inline", "yes", "--no-install",
+    cli, "give", "--dir", source, "--base", "/project", "--inline", "yes",
   ], repository);
+  assert.match(created.stdout, /dependencies not installed/u);
   assert.match(created.stdout, /dist\s+not built/u);
   const wrapper = path.join(source, "mywrap");
   await assert.rejects(stat(path.join(wrapper, "dist")));
-  assert.equal(await readFile(path.join(wrapper, "runtime", "data.json"), "utf8"),
-    await readFile(path.join(source, "runtime", "data.json"), "utf8"));
+  await assert.rejects(stat(path.join(wrapper, "node_modules")));
+
+  const main = await readFile(path.join(wrapper, "src", "main.ts"), "utf8");
+  assert.match(main, /import "\.\/app\/src\/main\.ts"/u);
+  await stat(path.join(wrapper, "src", "app", "src", "main.ts"));
+  await stat(path.join(wrapper, "src", "app", "src", "style.css"));
+  await stat(path.join(wrapper, "src", "app", "src", "helper.mts"));
+  await stat(path.join(wrapper, "src", "app", "src", "component.tsx"));
+  await assert.rejects(stat(path.join(wrapper, "src", "app", "src", "main.js")));
+  await stat(path.join(wrapper, "nested", "index.html"));
+  await assert.rejects(stat(path.join(wrapper, "orphan", "index.html")));
+  await stat(path.join(wrapper, "src", "app", "nested", "nested.ts"));
+  await stat(path.join(wrapper, "public", "runtime", "manifest", "index.json"));
+  await stat(path.join(wrapper, "public", "runtime", "manifest", "child.json"));
+  await stat(path.join(wrapper, "src", "app", "runtime", "data.json"));
+  await assert.rejects(stat(path.join(wrapper, ".env.private")));
+  const convertedModule = await readFile(path.join(wrapper, "src", "app", "src", "main.ts"), "utf8");
+  assert.match(convertedModule, /import\.meta\.env\.BASE_URL/u);
 
   const packageFile = JSON.parse(await readFile(path.join(wrapper, "package.json"), "utf8"));
-  assert.equal(packageFile.scripts.serve, "vite --config vitality.config.mts");
-  assert.equal(packageFile.scripts.build, "vite build --config vitality.config.mts");
+  assert.equal(packageFile.scripts.serve, "vite");
+  assert.equal(packageFile.scripts.build, "vite build");
   assert.equal(packageFile.vitality.base, "/project/");
   assert.equal(packageFile.vitality.assetsInlineLimit, "Infinity");
-  assert.match(await readFile(path.join(wrapper, "vitality.config.mts"), "utf8"),
-    /assetsInlineLimit: Number\.POSITIVE_INFINITY/u);
+  assert.equal(packageFile.vitality.pages, 1);
+  const config = await readFile(path.join(wrapper, "vite.config.ts"), "utf8");
+  assert.match(config, /assetsInlineLimit: Number\.POSITIVE_INFINITY/u);
+  assert.doesNotMatch(config, /preserve|copyFile|standalone/iu);
 
   run("bun", ["install"], wrapper);
-  const port = await freePort();
-  const server = spawn("bun", [
-    path.join(wrapper, "node_modules", "vite", "bin", "vite.js"),
-    "--config", "vitality.config.mts", "--host", "127.0.0.1", "--port", String(port), "--strictPort",
-  ], { cwd: wrapper, stdio: "ignore", windowsHide: true });
-  try {
-    const html = await waitForPage(`http://127.0.0.1:${port}/project/`, server);
-    assert.match(html, /Vitality fixture/u);
-  } finally {
-    const exited = new Promise((resolve) => server.once("exit", resolve));
-    server.kill();
-    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 2_000))]);
-  }
-
   run("bun", ["run", "build"], wrapper);
-  const builtHtml = await readFile(path.join(wrapper, "dist", "index.html"), "utf8");
-  assert.match(builtHtml, /\/project\//u);
+  const built = await allFiles(path.join(wrapper, "dist"));
+  assert.ok(built.includes("index.html"));
+  assert.ok(built.includes("nested/index.html"));
+  assert.equal(built.includes("orphan/index.html"), false);
+  assert.equal(built.some((file) => file.endsWith(".md")), false);
+  assert.ok(built.includes("runtime/manifest/index.json"));
+  assert.ok(built.includes("runtime/manifest/child.json"));
+  assert.match(await readFile(path.join(wrapper, "dist", "index.html"), "utf8"), /\/project\/assets\//u);
   const builtJavaScript = (await Promise.all(
-    (await readdir(path.join(wrapper, "dist", "assets")))
-      .filter((name) => name.endsWith(".js"))
-      .map((name) => readFile(path.join(wrapper, "dist", "assets", name), "utf8")),
+    built.filter((file) => file.endsWith(".js"))
+      .map((file) => readFile(path.join(wrapper, "dist", file), "utf8")),
   )).join("\n");
   assert.match(builtJavaScript, /data:image\/svg\+xml/u);
-  assert.match(builtJavaScript, /\/project\/runtime\/manifest\/index\.json/u);
-  assert.doesNotMatch(builtJavaScript, /data:application\/json[^\n]+child\.json/u);
-  await stat(path.join(wrapper, "dist", "nested", "index.html"));
-  await stat(path.join(wrapper, "dist", "runtime", "data.json"));
-  await stat(path.join(wrapper, "dist", "runtime", "manifest", "index.json"));
-  await stat(path.join(wrapper, "dist", "runtime", "manifest", "child.json"));
-  await assert.rejects(stat(path.join(wrapper, "dist", ".env.private")));
 });
 
-test("give preserves an existing config and its source serve command", async (context) => {
-  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "vitality-config-"));
+test("single-page output is one index, one JavaScript, and one CSS file", async (context) => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "vitality-single-"));
   context.after(() => rm(temporaryRoot, { recursive: true, force: true }));
   const source = path.join(temporaryRoot, "configured");
   const wrapper = path.join(temporaryRoot, "new", "nested", "output");
   await cp(path.join(fixtures, "configured"), source, { recursive: true });
 
   run(process.execPath, [
-    cli, "give", "--dir", source, "--output", wrapper, "--base", "/", "--no-inline", "--no-install",
+    cli, "give", "--dir", source, "--output", wrapper, "--base", "/", "--no-inline",
   ], repository);
   const packageFile = JSON.parse(await readFile(path.join(wrapper, "package.json"), "utf8"));
   assert.equal(packageFile.scripts["source:serve"], "node legacy-server.js");
+  assert.equal(packageFile.vitality.pages, 0);
+  await assert.rejects(stat(path.join(wrapper, "vite.config.js")));
   run("bun", ["install"], wrapper);
+  run("bun", ["run", "check"], wrapper);
   run("bun", ["run", "build"], wrapper);
+  assert.deepEqual(await allFiles(path.join(wrapper, "dist")), [
+    "assets/index.css",
+    "assets/index.js",
+    "index.html",
+  ]);
   const html = await readFile(path.join(wrapper, "dist", "index.html"), "utf8");
-  assert.match(html, /name="fixture-config" content="loaded"/u);
+  assert.doesNotMatch(html, /fixture-config/u);
 });
 
 test("give refuses to overwrite an existing wrapper", async (context) => {
@@ -132,9 +126,9 @@ test("give refuses to overwrite an existing wrapper", async (context) => {
   context.after(() => rm(temporaryRoot, { recursive: true, force: true }));
   const source = path.join(temporaryRoot, "source");
   await cp(path.join(fixtures, "configured"), source, { recursive: true });
-  const first = run(process.execPath, [cli, "give", "--dir", source, "--no-install"], repository);
+  const first = run(process.execPath, [cli, "give", "--dir", source], repository);
   assert.match(first.stdout, /Created/u);
-  const second = spawnSync(process.execPath, [cli, "give", "--dir", source, "--no-install"], {
+  const second = spawnSync(process.execPath, [cli, "give", "--dir", source], {
     cwd: repository,
     encoding: "utf8",
   });

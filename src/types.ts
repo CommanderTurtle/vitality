@@ -4,7 +4,6 @@ export interface CliOptions {
   output?: string;
   base?: string;
   inlineAssets?: boolean;
-  install?: boolean;
   dryRun: boolean;
   help: boolean;
   version: boolean;
@@ -15,7 +14,6 @@ export interface GiveOptions {
   output: string;
   base: string;
   inlineAssets: boolean;
-  install: boolean;
   dryRun: boolean;
 }
 
@@ -24,6 +22,6 @@ export interface ScaffoldReport {
   copiedBytes: number;
   excludedEntries: number;
   skippedLinks: number;
+  pages: string[];
   elapsedMilliseconds: number;
-  installed: boolean;
 }

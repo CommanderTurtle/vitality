@@ -4,10 +4,9 @@ import { version as viteVersion } from "vite";
 import { helpText, parseArguments, UsageError } from "./args.js";
 import { normalizeBase } from "./base.js";
 import { give } from "./give.js";
-import { InstallError } from "./install.js";
 import { resolveSourceDirectory, resolveWrapperDirectory, validateWrapperLayout, } from "./paths.js";
 import { PromptSession } from "./prompts.js";
-const vitalityVersion = "0.1.0";
+const vitalityVersion = "0.2.0";
 function formatBytes(bytes) {
     if (bytes < 1024)
         return `${bytes} B`;
@@ -42,7 +41,6 @@ async function resolveGiveOptions(parsed) {
             output,
             base: normalizeBase(base),
             inlineAssets,
-            install: parsed.install ?? true,
             dryRun: parsed.dryRun,
         };
     }
@@ -56,7 +54,7 @@ function printOperation(options) {
     console.log(`  wrapper      ${options.output}`);
     console.log(`  base         ${options.base === "" ? "(empty)" : options.base}`);
     console.log(`  asset inline ${options.inlineAssets ? "Infinity" : "Vite default"}`);
-    console.log(`  dependencies ${options.install ? "bun install" : "not installed"}`);
+    console.log("  dependencies not installed");
     console.log("  dist         not built\n");
 }
 async function main() {
@@ -85,17 +83,12 @@ async function main() {
     console.log(`Ready in ${(report.elapsedMilliseconds / 1000).toFixed(2)}s`);
     console.log("\nNext:");
     console.log(`  cd ${JSON.stringify(options.output)}`);
-    if (!report.installed)
-        console.log("  bun install");
+    console.log("  bun install");
     console.log("  bun run serve   # development");
     console.log("  bun run build   # writes dist/");
 }
 main().catch((error) => {
-    if (error instanceof InstallError) {
-        console.error(`vitality: wrapper created, but ${error.message}`);
-        console.error(`Run bun install in ${error.wrapper}`);
-    }
-    else if (error instanceof UsageError) {
+    if (error instanceof UsageError) {
         console.error(`vitality: ${error.message}`);
         console.error("Run vitality --help for usage.");
     }

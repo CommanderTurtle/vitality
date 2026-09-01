@@ -1,31 +1,69 @@
 # Vitality
 
-Vitality turns an ordinary standalone webapp directory into a self-contained
-Vite project without requiring that source project to already use Vite.
+Vitality turns an already working browser project into a conventional,
+unbuilt TypeScript/Vite source project. It is a source giver: it does not
+install dependencies, run the source, or create `dist/`.
 
 ```text
 vitality give --dir "some\path\regex-safe"
 ```
 
-The command asks two native terminal questions:
+The command asks:
 
 ```text
 Public base path [/]:
 Inline every imported asset (assetsInlineLimit: Infinity)? [y/N]:
 ```
 
-It then creates `some\path\regex-safe\mywrap`, copies the source into that
-wrapper, writes the TypeScript Vite layer, and installs the wrapper's own pinned
-toolchain. It intentionally does **not** build `dist/`.
+It then creates `SOURCE/mywrap` with this shape:
+
+```text
+mywrap/
+├── index.html
+├── src/
+│   ├── main.ts
+│   └── app/
+├── vite.config.ts
+├── tsconfig.json
+├── package.json
+└── README.md
+```
+
+Local ES-module graphs are moved beneath `src/app/`. Detected `.js`, `.jsx`,
+and `.mjs` modules become `.ts`, `.tsx`, and `.mts`; their local imports and
+HTML entry references are rewritten to the new literal paths. Existing
+TypeScript, CSS, JSON, images, framework dependencies, and other runtime assets
+remain available to Vite.
+
+Only secondary HTML reachable from the root runtime graph becomes a Vite page
+entry. Such pages retain their original routes. Documentation, tests, archived
+demos, and orphan `index.html` files are not copied as production pages.
+Client-side routers—including React Router—remain ordinary application code and
+are not mistaken for filesystem pages.
+
+When ready, the user explicitly runs:
 
 ```bash
 cd "some/path/regex-safe/mywrap"
+bun install
 bun run serve
 bun run build
 ```
 
-`serve` is the Vite development server. `build` is the explicit production
-step and writes `dist/`.
+For a single-page source, the generated production configuration converges to
+the normal compact topology:
+
+```text
+dist/
+├── index.html
+└── assets/
+    ├── index.js
+    └── index.css
+```
+
+A genuinely multi-page source additionally emits only its routable HTML pages
+and the chunks those pages require. Vitality never mirrors the source repository
+into `dist/`.
 
 ## Install Vitality
 
@@ -38,9 +76,9 @@ bun link
 vitality --version
 ```
 
-`bun link` registers the checkout and places its executable shim in Bun's
-global bin directory. That directory is normally `~/.bun/bin`, but a Windows
-Winget installation of Bun may not add it to `PATH` automatically.
+`bun link` places the executable shim in Bun's global bin directory. On Windows
+that directory is normally `%USERPROFILE%\.bun\bin`, but a Winget installation
+of Bun may not add it to `PATH` automatically.
 
 For the current PowerShell session:
 
@@ -50,7 +88,7 @@ $env:Path = "$bunBin;$env:Path"
 vitality --version
 ```
 
-To add it to the Windows user `PATH` once and also activate it immediately:
+To add it to the Windows user `PATH` once:
 
 ```powershell
 $bunBin = Join-Path $HOME ".bun\bin"
@@ -59,58 +97,51 @@ if (($userPath -split ";") -notcontains $bunBin) {
   [Environment]::SetEnvironmentVariable("Path", "$bunBin;$userPath", "User")
 }
 $env:Path = "$bunBin;$env:Path"
-vitality --version
 ```
 
-On Bash-compatible shells, use `export PATH="$HOME/.bun/bin:$PATH"` when the
-directory is not already present.
+On Bash-compatible shells, use `export PATH="$HOME/.bun/bin:$PATH"` if needed.
 
-Vitality requires Bun for wrapper dependency installation and a Vite-supported
-Node runtime (`^20.19.0` or `>=22.12.0`). It ships its own pinned Vite and
-TypeScript versions; it does not borrow the target project's global or local
-Vite installation.
+## Public base
 
-## Public bases
-
-The base question accepts the same useful deployment forms as Vite, including:
-
-- `/` for a domain root;
-- `/project/` for a GitHub Pages-style subdirectory;
-- `./` or an empty base for embedded relative deployment; and
-- an absolute `http://` or `https://` base.
-
-Vitality normalizes path bases with a trailing slash. The choice is recorded in
-the generated `package.json` and `vitality.config.mts`.
+The base is written directly to Vite's shared `base` option. Supported forms
+include `/`, `/project/`, `./`, an empty base, and absolute HTTP(S) bases. This
+is what makes a generated `dist/` suitable for a domain root, a GitHub Pages
+repository path, or an embedded relative directory without post-build editing.
 
 ## Asset inlining
 
-Answering Yes configures an unlimited imported-asset policy. Ordinary imported
-assets—including files larger than Vite's default threshold—are emitted as data
-URLs. Vitality preserves addressable HTML, QML, and relational JSON manifests
-when inlining them would break child paths loaded at runtime. This is the
-correctness exception that lets plugin catalogs such as `plugins/catalog.json`
-continue to resolve their sibling descriptors.
+The inline question controls exactly one Vite option:
 
-Answering No keeps Vite's normal asset threshold.
+```ts
+assetsInlineLimit: Number.POSITIVE_INFINITY
+```
 
-## Existing and non-Vite projects
+Answering No leaves Vite's default threshold. Vitality does not implement an
+asset registry, Blob protocol, repository copier, or alternate embedding
+system. Imported-asset behavior remains Vite's behavior.
 
-For a plain static project, Vitality discovers every HTML entry and retains
-files that are fetched or otherwise opened by name at runtime. For an existing
-Vite project, it loads the first `vite.config.*` through Vite's public API and
-merges it with Vitality's deployment settings. Any conflicting source scripts
-are preserved as `source:serve`, `source:build`, and similar names.
+When a reachable JSON manifest resolves sibling files by URL at runtime,
+Vitality places that minimal relational JSON graph in Vite's ordinary
+`public/` directory. This preserves browser URL semantics and the configured
+base without turning the rest of the repository into public build output.
 
-The generated build:
+## Detection and preservation
 
-- copies no `.git`, dependency, cache, coverage, or prior build trees;
-- never places `.env` or `.env.*` files in `dist/`;
+Vitality:
+
+- treats source paths as literal filesystem paths, never regular expressions;
 - refuses to overwrite an existing wrapper;
-- writes through a temporary sibling and publishes only after generation
-  succeeds;
-- treats command-line paths as literal filesystem values, not regular
-  expressions or shell globs; and
-- preserves runtime-only files without overwriting assets Vite already built.
+- publishes through a temporary sibling so a failed conversion leaves no
+  partial destination;
+- excludes dependency, VCS, cache, coverage, prior-build, docs, and test trees;
+- omits `.env*` files;
+- preserves the source package's runtime dependencies;
+- records displaced `dev`, `serve`, `build`, and `preview` scripts under
+  `source:*` names; and
+- supplies its own pinned Vite and TypeScript toolchain rather than relying on
+  a global or source-local Vite installation.
+
+The source directory is never changed.
 
 ## Options
 
@@ -119,16 +150,12 @@ vitality give --dir PATH
   --output PATH
   --base /project/
   --inline yes|no
-  --install yes|no
   --dry-run
 ```
 
 `--output` defaults to `SOURCE/mywrap`. `--base` and `--inline` skip their
-questions when explicitly supplied. `--no-inline` and `--no-install` are
-available for scripts. Boolean values accept `y/n`, `yes/no`, `true/false`,
-`on/off`, and `1/0`.
-
-Run `vitality --help` for the complete command reference.
+questions when supplied. `--no-inline` keeps Vite's default asset threshold.
+No install option exists because generation never installs.
 
 ## Verification
 
@@ -137,15 +164,10 @@ bun run check
 bun run test
 ```
 
-The tests exercise literal Windows-safe paths, native base normalization,
-transactional generation, a live Vite development server, existing-config
-merging, nested HTML entries, runtime files, secret exclusion, large-asset
-inlining, relational JSON manifests, and real production builds.
-
-Vitality is implemented against Vite's documented
-[JavaScript API](https://vite.dev/guide/api-javascript),
-[shared `base` option](https://vite.dev/config/shared-options), and
-[`build.assetsInlineLimit`](https://vite.dev/config/build-options).
+The tests cover literal Windows-safe paths, base normalization, uninstalled
+generation, JS/JSX/MJS-to-TypeScript entry mapping, reachable versus orphan
+HTML, multi-page routing, source-script preservation, large-asset inlining,
+secret exclusion, exact single-page `dist/` topology, and transactional output.
 
 ## License
 

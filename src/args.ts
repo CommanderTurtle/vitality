@@ -105,15 +105,6 @@ export function parseArguments(arguments_: string[]): CliOptions {
       case "--no-inline-assets":
         options.inlineAssets = false;
         break;
-      case "--install": {
-        const found = optionalBoolean(arguments_, index, name, attached);
-        options.install = found.value;
-        index = found.nextIndex;
-        break;
-      }
-      case "--no-install":
-        options.install = false;
-        break;
       case "--dry-run":
         options.dryRun = true;
         break;
@@ -143,8 +134,6 @@ Options:
   -b, --base PATH          Public base: /, /project/, ./, or an http(s) URL
       --inline [yes|no]    Generate assetsInlineLimit: Infinity (default: ask/No)
       --no-inline          Keep Vite's normal asset inline limit
-      --install [yes|no]   Run bun install in the wrapper (default: yes)
-      --no-install         Generate without installing dependencies
       --dry-run            Validate and show the operation without writing
   -h, --help               Show this help
   -v, --version            Show the Vitality and bundled Vite versions

@@ -3,6 +3,7 @@ export interface CopySummary {
     copiedBytes: number;
     excludedEntries: number;
     skippedLinks: number;
+    pages: string[];
 }
 export declare function temporarySibling(source: string, output: string): string;
 export declare function copyProject(source: string, output: string, temporary: string): Promise<CopySummary>;

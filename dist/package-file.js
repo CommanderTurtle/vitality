@@ -27,8 +27,8 @@ function wrapperName(original, directory) {
     }
     return `${name}-vitality`;
 }
-export async function writeWrapperPackage(wrapper, base, inlineAssets) {
-    const packagePath = path.join(wrapper, "package.json");
+export async function writeWrapperPackage(source, wrapper, base, inlineAssets, pageCount) {
+    const packagePath = path.join(source, "package.json");
     let original = {};
     try {
         const parsed = JSON.parse(await readFile(packagePath, "utf8"));
@@ -43,40 +43,45 @@ export async function writeWrapperPackage(wrapper, base, inlineAssets) {
             throw new UsageError(`source package.json is not valid JSON: ${error.message}`);
         }
     }
-    const scripts = objectProperty(original, "scripts");
+    const sourceScripts = objectProperty(original, "scripts");
+    const scripts = {};
     for (const reserved of ["dev", "serve", "build", "preview"]) {
-        const existing = scripts[reserved];
+        const existing = sourceScripts[reserved];
         if (typeof existing === "string" && existing !== "") {
             scripts[availableScriptName(scripts, `source:${reserved}`)] = existing;
         }
     }
-    scripts.dev = "vite --config vitality.config.mts";
-    scripts.serve = "vite --config vitality.config.mts";
-    scripts.build = "vite build --config vitality.config.mts";
-    scripts.preview = "vite preview --config vitality.config.mts";
+    scripts.dev = "vite";
+    scripts.serve = "vite";
+    scripts.build = "vite build";
+    scripts.preview = "vite preview";
+    scripts.check = "tsc --noEmit --noCheck";
     const dependencies = objectProperty(original, "dependencies");
     delete dependencies.vite;
     const devDependencies = objectProperty(original, "devDependencies");
     devDependencies.vite = viteVersion;
-    devDependencies.typescript ??= typescriptVersion;
+    devDependencies.typescript = typescriptVersion;
     const generated = {
         ...original,
         name: wrapperName(original.name, wrapper),
         private: true,
+        type: "module",
         scripts,
         dependencies,
         devDependencies,
         packageManager: "bun@1.4.0",
         vitality: {
-            schemaVersion: 1,
+            schemaVersion: 2,
             base,
             assetsInlineLimit: inlineAssets ? "Infinity" : "vite-default",
-            generatedConfig: "vitality.config.mts",
+            generatedConfig: "vite.config.ts",
+            sourceRoot: "src/app",
+            pages: pageCount,
         },
     };
     if (Object.keys(dependencies).length === 0)
         delete generated.dependencies;
-    await writeFile(packagePath, `${JSON.stringify(generated, null, 2)}\n`, "utf8");
+    await writeFile(path.join(wrapper, "package.json"), `${JSON.stringify(generated, null, 2)}\n`, "utf8");
 }
 export async function updateGitignore(wrapper) {
     const ignorePath = path.join(wrapper, ".gitignore");

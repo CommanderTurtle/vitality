@@ -7,13 +7,13 @@ import { containsPath } from "../dist/paths.js";
 
 test("parses the explicit give contract and literal path values", () => {
   const parsed = parseArguments([
-    "give", "--dir", "some\\path[not-a-glob]", "--base=/project", "--inline", "yes", "--no-install",
+    "give", "--dir", "some\\path[not-a-glob]", "--base=/project", "--inline", "yes",
   ]);
   assert.equal(parsed.command, "give");
   assert.equal(parsed.directory, "some\\path[not-a-glob]");
   assert.equal(parsed.base, "/project");
   assert.equal(parsed.inlineAssets, true);
-  assert.equal(parsed.install, false);
+  assert.equal("install" in parsed, false);
 });
 
 test("boolean parsing is strict but accepts shell-friendly spellings", () => {
