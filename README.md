@@ -38,6 +38,33 @@ bun link
 vitality --version
 ```
 
+`bun link` registers the checkout and places its executable shim in Bun's
+global bin directory. That directory is normally `~/.bun/bin`, but a Windows
+Winget installation of Bun may not add it to `PATH` automatically.
+
+For the current PowerShell session:
+
+```powershell
+$bunBin = Join-Path $HOME ".bun\bin"
+$env:Path = "$bunBin;$env:Path"
+vitality --version
+```
+
+To add it to the Windows user `PATH` once and also activate it immediately:
+
+```powershell
+$bunBin = Join-Path $HOME ".bun\bin"
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (($userPath -split ";") -notcontains $bunBin) {
+  [Environment]::SetEnvironmentVariable("Path", "$bunBin;$userPath", "User")
+}
+$env:Path = "$bunBin;$env:Path"
+vitality --version
+```
+
+On Bash-compatible shells, use `export PATH="$HOME/.bun/bin:$PATH"` when the
+directory is not already present.
+
 Vitality requires Bun for wrapper dependency installation and a Vite-supported
 Node runtime (`^20.19.0` or `>=22.12.0`). It ships its own pinned Vite and
 TypeScript versions; it does not borrow the target project's global or local
