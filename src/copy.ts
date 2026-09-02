@@ -9,6 +9,15 @@ const excludedDirectoryNames = new Set([
   "coverage", "dist", "build", "test", "tests", "__tests__", "docs", "tools",
 ]);
 
+const entrySearchExcludedDirectoryNames = new Set([
+  ".git", ".hg", ".svn", ".github", ".cache", ".tmp", ".vite", "node_modules",
+  "coverage", "dist", "build", "test", "tests", "__tests__", "tools",
+]);
+
+const deploymentPublicNames = new Set([
+  ".nojekyll", "404.html", "CNAME", "_headers", "_redirects",
+]);
+
 const excludedRootFiles = [
   /^package(?:-lock)?\.json$/u,
   /^(?:bun\.lockb?|pnpm-lock\.yaml|yarn\.lock)$/u,
@@ -40,8 +49,67 @@ interface SourceInventory {
   skippedLinks: number;
 }
 
+export interface SourceEntry {
+  index: string;
+  root: string;
+  relative: string;
+}
+
 function webPath(value: string): string {
   return value.split(path.sep).join("/");
+}
+
+export async function resolveSourceEntry(source: string): Promise<SourceEntry> {
+  const rootIndex = path.join(source, "index.html");
+  try {
+    const metadata = await stat(rootIndex);
+    if (!metadata.isFile()) throw new UsageError(`source index.html is not a file: ${rootIndex}`);
+    return { index: rootIndex, root: source, relative: "index.html" };
+  } catch (error) {
+    if (error instanceof UsageError) throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new UsageError(`could not inspect source index.html: ${(error as Error).message}`);
+    }
+  }
+
+  const candidates: string[] = [];
+  const pending = [source];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === undefined) break;
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const absolute = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (!entrySearchExcludedDirectoryNames.has(entry.name)) pending.push(absolute);
+        continue;
+      }
+      if (entry.isFile() && entry.name.toLowerCase() === "index.html") candidates.push(absolute);
+    }
+  }
+
+  if (candidates.length === 0) {
+    throw new UsageError(`source directory contains no index.html: ${source}`);
+  }
+  candidates.sort((left, right) => left.localeCompare(right));
+  const depth = (candidate: string): number => path.relative(source, candidate).split(path.sep).length;
+  const shallowestDepth = Math.min(...candidates.map(depth));
+  const shallowest = candidates.filter((candidate) => depth(candidate) === shallowestDepth);
+  if (shallowest.length > 1) {
+    const choices = shallowest.map((candidate) => `  - ${webPath(path.relative(source, candidate))}`).join("\n");
+    throw new UsageError(
+      `source has multiple equally shallow nested index.html entries:\n${choices}\n`
+      + "point --dir at the intended site directory",
+    );
+  }
+
+  const index = shallowest[0];
+  if (index === undefined) throw new Error("nested index discovery returned no candidate");
+  return {
+    index,
+    root: path.dirname(index),
+    relative: webPath(path.relative(source, index)),
+  };
 }
 
 function isRemoteReference(value: string): boolean {
@@ -191,6 +259,24 @@ async function discoverModules(
   return modules;
 }
 
+async function discoverClassicScripts(
+  files: string[], reachable: Set<string>, sourceRoot: string,
+): Promise<Set<string>> {
+  const known = new Set(files);
+  const scripts = new Set<string>();
+  for (const file of files.filter((candidate) => reachable.has(candidate) && /\.html?$/iu.test(candidate))) {
+    const html = await readFile(file, "utf8");
+    for (const match of html.matchAll(moduleScriptPattern)) {
+      const before = match[1] ?? "";
+      const after = match[4] ?? "";
+      if (/\btype\s*=\s*(["'])module\1/iu.test(`${before} ${after}`)) continue;
+      const resolved = resolveReference(file, match[3] ?? "", known, sourceRoot);
+      if (resolved !== undefined) scripts.add(resolved);
+    }
+  }
+  return scripts;
+}
+
 function jsonStringReferences(value: unknown, found: string[]): void {
   if (typeof value === "string") {
     found.push(value);
@@ -260,14 +346,14 @@ function destinationFor(
   appRoot: string,
   modules: Set<string>,
   reachable: Set<string>,
-  publicJson: Set<string>,
+  publicFiles: Set<string>,
 ): string {
   let relative = path.relative(source, file);
+  if (publicFiles.has(file)) return path.join(wrapperRoot, "public", relative);
   if (/\.html?$/iu.test(relative)) {
     if (!reachable.has(file)) throw new Error(`unroutable HTML has no destination: ${relative}`);
     return path.join(wrapperRoot, relative);
   }
-  if (publicJson.has(file)) return path.join(wrapperRoot, "public", relative);
   if (modules.has(file)) {
     const extension = path.extname(relative).toLowerCase();
     if (extension === ".js") relative = `${relative.slice(0, -3)}.ts`;
@@ -294,7 +380,11 @@ function rewrittenReference(
   if (target === undefined) return undefined;
   const destination = destinations.get(target);
   if (destination === undefined) return undefined;
-  if (containsPath(publicRoot, destination)) return undefined;
+  if (containsPath(publicRoot, destination)) {
+    if (!/\.html?$/iu.test(sourceFile)) return undefined;
+    const relative = webPath(path.relative(publicRoot, destination));
+    return `%BASE_URL%${relative}${suffix}`;
+  }
   let relative = webPath(path.relative(path.dirname(destinationFile), destination));
   if (!relative.startsWith(".")) relative = `./${relative}`;
   return `${relative}${suffix}`;
@@ -348,6 +438,7 @@ function isTextFile(file: string): boolean {
 
 function rootEntry(
   sourceIndex: string,
+  sourceRoot: string,
   wrapperIndex: string,
   original: string,
   known: Set<string>,
@@ -358,7 +449,7 @@ function rootEntry(
   const imports: string[] = [];
   let html = original.replace(styleLinkPattern, (whole, before: string, _quote: string, href: string, after: string) => {
     if (!/\brel\s*=\s*(["'])stylesheet\1/iu.test(`${before} ${after}`)) return whole;
-    const target = resolveReference(sourceIndex, href, known, path.dirname(sourceIndex));
+    const target = resolveReference(sourceIndex, href, known, sourceRoot);
     const destination = target === undefined ? undefined : destinations.get(target);
     if (destination === undefined) return whole;
     let relative = webPath(path.relative(path.dirname(mainFile), destination));
@@ -369,7 +460,7 @@ function rootEntry(
 
   html = html.replace(moduleScriptPattern, (whole, before: string, _quote: string, src: string, after: string) => {
     if (!/\btype\s*=\s*(["'])module\1/iu.test(`${before} ${after}`)) return whole;
-    const target = resolveReference(sourceIndex, src, known, path.dirname(sourceIndex));
+    const target = resolveReference(sourceIndex, src, known, sourceRoot);
     const destination = target === undefined ? undefined : destinations.get(target);
     if (destination === undefined) return whole;
     let relative = webPath(path.relative(path.dirname(mainFile), destination));
@@ -385,7 +476,7 @@ function rootEntry(
     return "";
   });
   html = rewriteLocalReferences(
-    html, sourceIndex, wrapperIndex, known, destinations, path.dirname(sourceIndex), publicRoot,
+    html, sourceIndex, wrapperIndex, known, destinations, sourceRoot, publicRoot,
   );
   const entry = '    <script type="module" src="/src/main.ts"></script>\n';
   html = /<\/body\s*>/iu.test(html)
@@ -407,32 +498,32 @@ export function temporarySibling(source: string, output: string): string {
 }
 
 export async function copyProject(
-  source: string,
+  sourceRoot: string,
+  sourceIndex: string,
   output: string,
   temporary: string,
 ): Promise<CopySummary> {
-  const sourceIndex = path.join(source, "index.html");
-  try {
-    if (!(await stat(sourceIndex)).isFile()) throw new UsageError("source index.html is not a file");
-  } catch (error) {
-    if (error instanceof UsageError) throw error;
-    throw new UsageError(`source directory has no root index.html: ${source}`);
-  }
-
-  const found = await inventory(source, output, temporary);
+  const found = await inventory(sourceRoot, output, temporary);
   const known = new Set(found.files);
-  const reachable = await discoverReachable(found.files, sourceIndex, source);
-  const modules = await discoverModules(found.files, reachable, source);
+  const reachable = await discoverReachable(found.files, sourceIndex, sourceRoot);
+  const modules = await discoverModules(found.files, reachable, sourceRoot);
   const appRoot = path.join(temporary, "src", "app");
   const publicRoot = path.join(temporary, "public");
-  const publicJson = await discoverPublicJson(found.files, reachable, source);
+  const publicJson = await discoverPublicJson(found.files, reachable, sourceRoot);
+  const classicScripts = await discoverClassicScripts(found.files, reachable, sourceRoot);
+  const publicFiles = new Set([...publicJson, ...classicScripts]);
+  for (const file of found.files) {
+    if (path.dirname(file) === sourceRoot && deploymentPublicNames.has(path.basename(file))) {
+      publicFiles.add(file);
+    }
+  }
   const destinations = new Map<string, string>();
   for (const file of found.files) {
-    if (/\.html?$/iu.test(file) && !reachable.has(file)) continue;
+    if (/\.html?$/iu.test(file) && !reachable.has(file) && !publicFiles.has(file)) continue;
     if (file !== sourceIndex) {
       destinations.set(
         file,
-        destinationFor(source, file, temporary, appRoot, modules, reachable, publicJson),
+        destinationFor(sourceRoot, file, temporary, appRoot, modules, reachable, publicFiles),
       );
     }
   }
@@ -445,12 +536,12 @@ export async function copyProject(
     const destination = destinations.get(file);
     if (destination === undefined) continue;
     await mkdir(path.dirname(destination), { recursive: true });
-    if (publicJson.has(file)) {
+    if (publicFiles.has(file)) {
       await writeFile(destination, await readFile(file));
     } else if (isTextFile(file)) {
       const sourceText = await readFile(file, "utf8");
       const rewritten = rewriteLocalReferences(
-        sourceText, file, destination, known, destinations, source, publicRoot,
+        sourceText, file, destination, known, destinations, sourceRoot, publicRoot,
       );
       await writeFile(destination, rewritten, "utf8");
     } else {
@@ -463,6 +554,7 @@ export async function copyProject(
   const wrapperIndex = path.join(temporary, "index.html");
   const entry = rootEntry(
     sourceIndex,
+    sourceRoot,
     wrapperIndex,
     await readFile(sourceIndex, "utf8"),
     known,
@@ -482,7 +574,9 @@ export async function copyProject(
     excludedEntries: found.excludedEntries,
     skippedLinks: found.skippedLinks,
     pages: [...destinations.entries()]
-      .filter(([sourceFile]) => /\.html?$/iu.test(sourceFile))
+      .filter(([sourceFile, destination]) => (
+        /\.html?$/iu.test(sourceFile) && !containsPath(publicRoot, destination)
+      ))
       .map(([, destination]) => webPath(path.relative(temporary, destination)))
       .sort((left, right) => left.localeCompare(right)),
   };

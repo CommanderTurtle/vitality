@@ -3,6 +3,7 @@ import process from "node:process";
 import { version as viteVersion } from "vite";
 import { helpText, parseArguments, UsageError } from "./args.js";
 import { normalizeBase } from "./base.js";
+import { resolveSourceEntry } from "./copy.js";
 import { give } from "./give.js";
 import {
   resolveSourceDirectory,
@@ -12,7 +13,7 @@ import {
 import { PromptSession } from "./prompts.js";
 import type { CliOptions, GiveOptions } from "./types.js";
 
-const vitalityVersion = "0.2.0";
+const vitalityVersion = "0.3.0";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -32,6 +33,7 @@ async function resolveGiveOptions(parsed: CliOptions): Promise<GiveOptions> {
     const source = await resolveSourceDirectory(directory, process.cwd());
     const output = await resolveWrapperDirectory(parsed.output, source);
     await validateWrapperLayout(source, output);
+    const entry = await resolveSourceEntry(source);
 
     let base = parsed.base;
     if (base === undefined) base = prompt ? await prompt.text("Public base path", "/") : "/";
@@ -44,6 +46,9 @@ async function resolveGiveOptions(parsed: CliOptions): Promise<GiveOptions> {
     }
     return {
       source,
+      siteRoot: entry.root,
+      sourceIndex: entry.index,
+      sourceEntry: entry.relative,
       output,
       base: normalizeBase(base),
       inlineAssets,
@@ -57,6 +62,7 @@ async function resolveGiveOptions(parsed: CliOptions): Promise<GiveOptions> {
 function printOperation(options: GiveOptions): void {
   console.log("\nVitality give");
   console.log(`  source       ${options.source}`);
+  console.log(`  entry        ${options.sourceEntry}`);
   console.log(`  wrapper      ${options.output}`);
   console.log(`  base         ${options.base === "" ? "(empty)" : options.base}`);
   console.log(`  asset inline ${options.inlineAssets ? "Infinity" : "Vite default"}`);

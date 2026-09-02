@@ -79,7 +79,8 @@ and test pages are not treated as production entries.
 ordinary Vite build topology. Vitality adds no runtime asset registry and does
 not copy the source repository into \`dist/\`. URL-addressed JSON manifests
 that must retain sibling-relative links use Vite's ordinary \`public/\`
-directory; everything else stays in the imported source graph.
+directory. Classic scripts and static-host control files use that same native
+path; everything else stays in the imported source graph.
 
 Run the toolchain explicitly when ready:
 

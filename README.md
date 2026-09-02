@@ -29,6 +29,12 @@ mywrap/
 └── README.md
 ```
 
+If `SOURCE/index.html` does not exist, Vitality searches for nested site roots.
+The unique shallowest `index.html` becomes the entry, so repository layouts
+such as `docs/index.html` can still be given from the repository root. A root
+entry always wins. If two equally shallow candidates exist, Vitality refuses
+to guess; point `--dir` directly at the intended site directory.
+
 Local ES-module graphs are moved beneath `src/app/`. Detected `.js`, `.jsx`,
 and `.mjs` modules become `.ts`, `.tsx`, and `.mts`; their local imports and
 HTML entry references are rewritten to the new literal paths. Existing
@@ -124,6 +130,9 @@ When a reachable JSON manifest resolves sibling files by URL at runtime,
 Vitality places that minimal relational JSON graph in Vite's ordinary
 `public/` directory. This preserves browser URL semantics and the configured
 base without turning the rest of the repository into public build output.
+Classic non-module scripts use the same path, with `%BASE_URL%` references in
+generated HTML. Static-host control files at the selected site root (`404.html`,
+`CNAME`, `.nojekyll`, `_headers`, and `_redirects`) are preserved there too.
 
 ## Detection and preservation
 
@@ -134,6 +143,7 @@ Vitality:
 - publishes through a temporary sibling so a failed conversion leaves no
   partial destination;
 - excludes dependency, VCS, cache, coverage, prior-build, docs, and test trees;
+- recognizes a unique nested deployment root before applying those exclusions;
 - omits `.env*` files;
 - preserves the source package's runtime dependencies;
 - records displaced `dev`, `serve`, `build`, and `preview` scripts under

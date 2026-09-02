@@ -39,6 +39,7 @@ export async function writeWrapperPackage(
   base: string,
   inlineAssets: boolean,
   pageCount: number,
+  sourceEntry: string,
 ): Promise<void> {
   const packagePath = path.join(source, "package.json");
   let original: JsonObject = {};
@@ -83,11 +84,12 @@ export async function writeWrapperPackage(
     devDependencies,
     packageManager: "bun@1.4.0",
     vitality: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       base,
       assetsInlineLimit: inlineAssets ? "Infinity" : "vite-default",
       generatedConfig: "vite.config.ts",
       sourceRoot: "src/app",
+      sourceEntry,
       pages: pageCount,
     },
   };

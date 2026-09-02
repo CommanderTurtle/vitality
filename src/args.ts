@@ -129,7 +129,7 @@ bundle is created by give. Afterward:
   bun run build        # production bundle in dist/
 
 Options:
-  -d, --dir PATH           Source standalone directory (literal filesystem path)
+  -d, --dir PATH           Source site or containing repo (literal filesystem path)
   -o, --output PATH        Wrapper destination (default: SOURCE/mywrap)
   -b, --base PATH          Public base: /, /project/, ./, or an http(s) URL
       --inline [yes|no]    Generate assetsInlineLimit: Infinity (default: ask/No)

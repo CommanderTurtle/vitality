@@ -1,6 +1,6 @@
 {
   "name": "vitality",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Wrap a standalone web directory in a production-ready Vite project.",
   "type": "module",
   "bin": {

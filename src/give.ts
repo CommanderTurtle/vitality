@@ -10,7 +10,12 @@ export async function give(options: GiveOptions): Promise<ScaffoldReport> {
   const temporary = temporarySibling(options.source, options.output);
   let published = false;
   try {
-    const copied = await copyProject(options.source, options.output, temporary);
+    const copied = await copyProject(
+      options.siteRoot,
+      options.sourceIndex,
+      options.output,
+      temporary,
+    );
     await mkdir(path.join(temporary, "src"), { recursive: true });
     await Promise.all([
       writeFile(
@@ -21,7 +26,14 @@ export async function give(options: GiveOptions): Promise<ScaffoldReport> {
       writeFile(path.join(temporary, "tsconfig.json"), generatedTsconfig, "utf8"),
       writeFile(path.join(temporary, "README.md"), generatedReadme, "utf8"),
     ]);
-    await writeWrapperPackage(options.source, temporary, options.base, options.inlineAssets, copied.pages.length);
+    await writeWrapperPackage(
+      options.source,
+      temporary,
+      options.base,
+      options.inlineAssets,
+      copied.pages.length,
+      options.sourceEntry,
+    );
     await updateGitignore(temporary);
     await publishTemporary(temporary, options.output);
     published = true;

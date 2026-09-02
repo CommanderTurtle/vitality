@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -119,6 +119,60 @@ test("single-page output is one index, one JavaScript, and one CSS file", async 
   ]);
   const html = await readFile(path.join(wrapper, "dist", "index.html"), "utf8");
   assert.doesNotMatch(html, /fixture-config/u);
+});
+
+test("give promotes a unique shallowest nested index as the site root", async (context) => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "vitality-nested-root-"));
+  context.after(() => rm(temporaryRoot, { recursive: true, force: true }));
+  const source = path.join(temporaryRoot, "source");
+  await cp(path.join(fixtures, "nested-root"), source, { recursive: true });
+
+  const dryRun = run(process.execPath, [
+    cli, "give", "--dir", source, "--base", "/", "--no-inline", "--dry-run",
+  ], repository);
+  assert.match(dryRun.stdout, /entry\s+docs\/index\.html/u);
+  await assert.rejects(stat(path.join(source, "mywrap")));
+
+  run(process.execPath, [
+    cli, "give", "--dir", source, "--base", "/", "--no-inline",
+  ], repository);
+  const wrapper = path.join(source, "mywrap");
+  const packageFile = JSON.parse(await readFile(path.join(wrapper, "package.json"), "utf8"));
+  assert.equal(packageFile.vitality.schemaVersion, 3);
+  assert.equal(packageFile.vitality.sourceEntry, "docs/index.html");
+  assert.match(await readFile(path.join(wrapper, "src", "main.ts"), "utf8"), /\.\/app\/main\.ts/u);
+  assert.match(await readFile(path.join(wrapper, "index.html"), "utf8"), /%BASE_URL%vendor\/legacy\.js/u);
+  await assert.rejects(stat(path.join(wrapper, "src", "app", "docs")));
+
+  run("bun", ["install"], wrapper);
+  run("bun", ["run", "build"], wrapper);
+  assert.deepEqual(await allFiles(path.join(wrapper, "dist")), [
+    "404.html",
+    "CNAME",
+    "assets/index.css",
+    "assets/index.js",
+    "index.html",
+    "vendor/legacy.js",
+  ]);
+});
+
+test("give refuses to guess between equally shallow nested entries", async (context) => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "vitality-ambiguous-root-"));
+  context.after(() => rm(temporaryRoot, { recursive: true, force: true }));
+  const source = path.join(temporaryRoot, "source");
+  await mkdir(path.join(source, "app"), { recursive: true });
+  await mkdir(path.join(source, "docs"), { recursive: true });
+  await writeFile(path.join(source, "app", "index.html"), "<!doctype html><title>app</title>");
+  await writeFile(path.join(source, "docs", "index.html"), "<!doctype html><title>docs</title>");
+
+  const result = spawnSync(process.execPath, [
+    cli, "give", "--dir", source, "--base", "/", "--no-inline",
+  ], { cwd: repository, encoding: "utf8", windowsHide: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /multiple equally shallow nested index\.html entries/u);
+  assert.match(result.stderr, /app\/index\.html/u);
+  assert.match(result.stderr, /docs\/index\.html/u);
+  await assert.rejects(stat(path.join(source, "mywrap")));
 });
 
 test("give refuses to overwrite an existing wrapper", async (context) => {

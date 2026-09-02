@@ -11,6 +11,9 @@ export interface CliOptions {
 
 export interface GiveOptions {
   source: string;
+  siteRoot: string;
+  sourceIndex: string;
+  sourceEntry: string;
   output: string;
   base: string;
   inlineAssets: boolean;

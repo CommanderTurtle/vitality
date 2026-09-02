@@ -27,7 +27,7 @@ function wrapperName(original, directory) {
     }
     return `${name}-vitality`;
 }
-export async function writeWrapperPackage(source, wrapper, base, inlineAssets, pageCount) {
+export async function writeWrapperPackage(source, wrapper, base, inlineAssets, pageCount, sourceEntry) {
     const packagePath = path.join(source, "package.json");
     let original = {};
     try {
@@ -71,11 +71,12 @@ export async function writeWrapperPackage(source, wrapper, base, inlineAssets, p
         devDependencies,
         packageManager: "bun@1.4.0",
         vitality: {
-            schemaVersion: 2,
+            schemaVersion: 3,
             base,
             assetsInlineLimit: inlineAssets ? "Infinity" : "vite-default",
             generatedConfig: "vite.config.ts",
             sourceRoot: "src/app",
+            sourceEntry,
             pages: pageCount,
         },
     };
