@@ -161,14 +161,15 @@ For single-page projects, `--no-public` (also `--nopublic`) embeds URL-loaded
 runtime assets as well. It implies Infinity and cannot be combined with
 `--no-inline`. Existing behavior remains the default when it is not selected.
 
-Existing Vite projects with their own configuration are currently rejected in
-this mode: plugin-defined copy targets and transforms must not be silently lost.
-Use their native build until those rules can be carried over. Embedded WASM
-keeps its bytes and MIME type; it has no separate output filename to randomize.
+Existing Vite projects retain their source layout and plugins. Direct imports of
+`vite-plugin-static-copy` in the entry config are adapted to embed their targets
+and transformations; unsupported extra outputs fail explicitly. WASM and runtime
+engine sidecars are copied byte-for-byte into `assets/` with content-hashed names;
+their import, fetch, and worker references resolve to the renamed files.
 
 The wrapper has `publicDir: false`. Native modules and editable TypeScript enter
 the Vite graph; images, fonts, stylesheets, JSON, and other local resources are
-embedded as data URLs. Runtime-loaded modules resolve through a lazy import
+embedded as data URLs, except WASM/engine files. Runtime-loaded modules resolve through a lazy import
 table. URL-addressed worker scripts are bundled into the payload and exposed as
 browser-local Blob URLs. There is no service worker, server, or upstream build
 command. All compiling happens inside `mywrap`, when you run Vite yourself.
@@ -176,7 +177,8 @@ command. All compiling happens inside `mywrap`, when you run Vite yourself.
 Classic HTML scripts keep classic scope; their content is inlined, with CSP
 hashes when a policy exists. Sources, including notices, remain in the wrapper;
 notices and source maps are not deployed as loose assets. The output is
-`index.html`, `assets/index.js`, and optionally `assets/index.css`. The build
+`index.html`, one entry JS asset, optionally one CSS asset, and hashed engine
+assets. Native Vite wrappers retain hashed entry filenames. The build
 fails if an additional file would be emitted instead of silently copying it.
 
 Inlining trades away separate-file caching and lazy network downloads; a large

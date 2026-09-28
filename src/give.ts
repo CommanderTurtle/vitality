@@ -5,18 +5,21 @@ import { updateGitignore, writeWrapperPackage } from "./package-file.js";
 import { generatedReadme, generatedTsconfig, renderViteConfig } from "./templates.js";
 import { copyComposition } from "./composed-project.js";
 import type { GiveOptions, ScaffoldReport } from "./types.js";
-import { UsageError } from "./args.js";
+import { copyNativeVite } from "./native-vite.js";
 
 export async function give(options: GiveOptions): Promise<ScaffoldReport> {
-  // Source Vite plugins may create runtime assets (WASM, workers, fonts).
-  // Replacing that configuration silently would produce an incomplete wrapper.
-  if (options.noPublic && (await readdir(options.source)).some(name => /^vite\.config\.[cm]?[jt]s$/i.test(name))) {
-    throw new UsageError("--no-public cannot yet preserve an existing Vite configuration's plugins and asset-copy rules. Keep this project's native Vite build; no wrapper was created.");
-  }
+  const nativeConfig = options.noPublic
+    ? (await readdir(options.source)).find(name => /^vite\.config\.[cm]?[jt]s$/i.test(name)) : undefined;
   const started = performance.now();
   const temporary = temporarySibling(options.source, options.output);
   let published = false;
   try {
+    if (nativeConfig) {
+      const copied = await copyNativeVite(options, temporary, nativeConfig);
+      await publishTemporary(temporary, options.output);
+      published = true;
+      return { ...copied, elapsedMilliseconds: performance.now() - started };
+    }
     const copied = options.composition
       ? await copyComposition(options.source, temporary, options.composition, options.base, options.inlineAssets, options.noPublic)
       : await copyProject(

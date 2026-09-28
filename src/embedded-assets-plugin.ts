@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { build, type Plugin } from "vite";
 
@@ -19,6 +20,17 @@ export function embeddedAssets(root: string): Plugin {
   let base = "/";
   const cache = new Map<string, string>();
   const active = new Set<string>();
+  const emitted = new Set<string>();
+  let emit: (fileName: string, source: Buffer) => void;
+  const engineAsset = (name: string) => /\.wasm(?:\.js)?$|\.(?:data|sf2|gz|tar)$/i.test(name);
+  function engineURL(name: string, bytes: Buffer): string {
+    const suffix = name.endsWith(".wasm.js") ? ".wasm.js" : path.extname(name);
+    const stem = path.basename(name, suffix).replace(/[^\w.-]/g, "-");
+    const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+    const fileName = `assets/${stem}-${hash}${suffix}`;
+    if (!emitted.has(fileName)) { emit(fileName, bytes); emitted.add(fileName); }
+    return base + fileName;
+  }
   function target(value: string, from: string): string | undefined {
     if (/^(?:[a-z][\w+.-]*:|\/\/|#)/i.test(value)) return;
     const clean = value.split(/[?#]/)[0] ?? "";
@@ -36,6 +48,12 @@ export function embeddedAssets(root: string): Plugin {
     if (path.relative(root, file).split(path.sep).includes("..")) throw new Error("Asset escapes wrapper: " + source);
     active.add(name);
     let bytes = readFileSync(file);
+    if (engineAsset(name)) {
+      const url = engineURL(name, bytes);
+      cache.set(name, url);
+      active.delete(name);
+      return url;
+    }
     const ext = path.posix.extname(name).toLowerCase();
     const replace = (value: string) => {
       const found = target(value, name);
@@ -67,7 +85,11 @@ export function embeddedAssets(root: string): Plugin {
     name: "vitality-embedded-assets",
     enforce: "pre",
     configResolved(config) { base = config.base; },
-    buildStart() { cache.clear(); active.clear(); for (const file of Object.values(files)) this.addWatchFile(path.resolve(root, file)); },
+    buildStart() {
+      cache.clear(); active.clear(); emitted.clear();
+      emit = (fileName, source) => { this.emitFile({ type: "asset", fileName, source }); };
+      for (const file of Object.values(files)) this.addWatchFile(path.resolve(root, file));
+    },
     handleHotUpdate() { cache.clear(); active.clear(); },
     resolveId(id) { if (id === "virtual:vitality-assets") return "\0vitality-assets"; },
     async load(id) {
@@ -75,10 +97,12 @@ export function embeddedAssets(root: string): Plugin {
       const scriptData: Record<string, string> = {};
       for (const [name, file] of Object.entries(classic)) {
         this.addWatchFile(path.resolve(root, file));
-        scriptData[name] = readFileSync(path.resolve(root, file)).toString("base64");
+        const bytes = readFileSync(path.resolve(root, file));
+        scriptData[name] = engineAsset(name) ? "url:" + engineURL(name, bytes) : bytes.toString("base64");
       }
       for (const [name, file] of Object.entries(scripts)) {
         if (Object.hasOwn(scriptData, name)) continue;
+        if (engineAsset(name)) { scriptData[name] = "url:" + engineURL(name, readFileSync(path.resolve(root, file))); continue; }
         this.addWatchFile(path.resolve(root, file));
         // URL-based workers/scripts need an independent bundle, embedded in the
         // main payload rather than emitted as a separate deployment file.
@@ -111,7 +135,7 @@ export function embeddedAssets(root: string): Plugin {
       return html.replace(/%VITALITY_ASSET:([^%]+)%/g, (_all, name: string) => encode(Buffer.from(name, "base64url").toString("utf8")));
     } },
     generateBundle: { order: "post", handler(_options, bundle) {
-      const unexpected = Object.keys(bundle).filter(name => !name.endsWith(".html") && name !== "assets/index.js" && name !== "assets/index.css");
+      const unexpected = Object.keys(bundle).filter(name => !name.endsWith(".html") && name !== "assets/index.js" && name !== "assets/index.css" && !emitted.has(name));
       if (unexpected.length) this.error("No-public build emitted separate files: " + unexpected.join(", ") + ". Use an inline worker/asset import or disable --no-public.");
     } },
   };

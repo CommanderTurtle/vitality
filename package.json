@@ -30,6 +30,7 @@
   ],
   "license": "AGPL-3.0-only",
   "dependencies": {
+    "tinyglobby": "^0.2.15",
     "typescript-parser": "npm:typescript@5.9.3",
     "vite": "8.2.2"
   },

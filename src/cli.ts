@@ -82,7 +82,7 @@ function printOperation(options: GiveOptions): void {
   console.log(`  wrapper      ${options.output}`);
   console.log(`  base         ${options.base === "" ? "(empty)" : options.base}`);
   console.log(`  asset inline ${options.inlineAssets ? "Infinity" : "Vite default"}`);
-  console.log(`  public files ${options.noPublic ? "embedded (no public copy)" : "preserve URL-loaded files"}`);
+  console.log(`  public files ${options.noPublic ? "embedded; WASM/engines hashed in assets/" : "preserve URL-loaded files"}`);
   console.log("  dependencies not installed");
   console.log("  dist         not built\n");
 }
