@@ -161,6 +161,11 @@ For single-page projects, `--no-public` (also `--nopublic`) embeds URL-loaded
 runtime assets as well. It implies Infinity and cannot be combined with
 `--no-inline`. Existing behavior remains the default when it is not selected.
 
+Existing Vite projects with their own configuration are currently rejected in
+this mode: plugin-defined copy targets and transforms must not be silently lost.
+Use their native build until those rules can be carried over. Embedded WASM
+keeps its bytes and MIME type; it has no separate output filename to randomize.
+
 The wrapper has `publicDir: false`. Native modules and editable TypeScript enter
 the Vite graph; images, fonts, stylesheets, JSON, and other local resources are
 embedded as data URLs. Runtime-loaded modules resolve through a lazy import

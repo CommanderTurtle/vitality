@@ -25,6 +25,7 @@ export async function embedPublicFiles(root: string, base: string, pages: string
   if (pages.length) throw new UsageError("--no-public currently requires a single-page entry; use normal mode for routable HTML pages");
   const publicFiles = await inventory(path.join(root, "public"));
   const modules = new Map<string, string>();
+  const dynamicModules = new Set<string>();
   const assets: Record<string, string> = {};
   const originalNames = new Map<string, string>();
   const files = new Map<string, string>();
@@ -32,20 +33,31 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     const dest = "src/embedded/" + name;
     files.set(name, dest);
     if (nonRuntime.test(name)) continue;
-    if (moduleFile.test(name)) { modules.set(name, dest); originalNames.set(dest, name); }
+    if (moduleFile.test(name)) { modules.set(name, dest); originalNames.set(dest, name); dynamicModules.add(name); }
     else assets[name] = dest;
   }
   if (publicFiles.length) await rename(path.join(root, "public"), path.join(root, "src/embedded"));
   const appFiles = await inventory(path.join(root, "src/app"));
-  for (const file of appFiles) if (moduleFile.test(file)) {
-    modules.set(file, "src/app/" + file);
-    const jsName = file.replace(/\.mts$/, ".mjs").replace(/\.tsx$/, ".jsx").replace(/\.ts$/, ".js");
-    if (!modules.has(jsName)) modules.set(jsName, "src/app/" + file);
+  for (const file of appFiles) {
+    const dest = "src/app/" + file;
+    files.set(file, dest);
+    // HTML has already been rebased to src/app by the ordinary copier.
+    files.set(dest, dest);
+    if (nonRuntime.test(file)) continue;
+    if (moduleFile.test(file)) {
+      modules.set(file, dest);
+      const jsName = file.replace(/\.mts$/, ".mjs").replace(/\.tsx$/, ".jsx").replace(/\.ts$/, ".js");
+      if (!modules.has(jsName)) modules.set(jsName, dest);
+    } else {
+      assets[file] = dest;
+      assets[dest] = dest;
+    }
   }
   for (const [name, item] of plan?.files ?? []) if ("module" in item) {
     const source = web(path.relative(sourceRoot, item.module)).replace(/\.js$/i, ".ts").replace(/\.mjs$/i, ".mts").replace(/\.jsx$/i, ".tsx");
     if (!appFiles.includes(source)) throw new UsageError("Cannot map source module for no-public output: " + name);
     modules.set(name, "src/app/" + source);
+    dynamicModules.add(name);
     originalNames.set("src/app/" + source, name);
   }
   const resolve = (value: string, from = "index.html") => {
@@ -90,13 +102,15 @@ export async function embedPublicFiles(root: string, base: string, pages: string
   // Convert only known local URLs. API routes and unrecognized external URLs stay intact.
   const codeFiles = (await inventory(path.join(root, "src"))).map(name => "src/" + name).filter(name => moduleFile.test(name) && !nonRuntime.test(name));
   const scriptURLs: Record<string, string> = {};
+  const classicScripts: Record<string, string> = {};
   const transformed = new Map<string, string>();
   for (const file of codeFiles) {
     if (file.startsWith("src/embedded/") && !originalNames.has(file)) continue; // inlined classic script
     let code = await readFile(path.join(root, file), "utf8");
     const source = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true, file.endsWith(".tsx") ? ts.ScriptKind.TSX : file.endsWith(".ts") ? ts.ScriptKind.TS : ts.ScriptKind.JS);
     const origin = originalNames.get(file) ?? file.replace(/^src\/app\//, "");
-    const sourceURL = `new URL(import.meta.env.BASE_URL + ${JSON.stringify(origin)}, globalThis.location.href).href`;
+    if (!ts.isExternalModule(source) && /\.js$/i.test(file)) classicScripts[origin] = file;
+    const sourceURL = `new URL(${JSON.stringify(origin)}, globalThis.__vitalityEmbedded.root).href`;
     const edits: { start: number; end: number; text: string }[] = [];
     const edit = (node: ts.Node, text: string) => edits.push({ start: node.getStart(source), end: node.end, text });
     const relativeModule = (name: string) => {
@@ -119,6 +133,10 @@ export async function embedPublicFiles(root: string, base: string, pages: string
           const name = resolve(arg.text, origin);
           if (name && modules.has(name)) {
             scriptURLs[name] = modules.get(name)!;
+            if (node.expression.text === "URL") {
+              edit(node, `new URL(globalThis.__vitalityEmbedded.script(${JSON.stringify(name)}))`);
+              return;
+            }
             edit(arg, `globalThis.__vitalityEmbedded.script(${JSON.stringify(name)})`);
             for (const other of node.arguments?.slice(1) ?? []) visit(other);
             return;
@@ -142,7 +160,7 @@ export async function embedPublicFiles(root: string, base: string, pages: string
         if (name && modules.has(name)) edit(node.moduleSpecifier, JSON.stringify(relativeModule(name)));
         return;
       }
-      if (ts.isPropertyAccessExpression(node) && node.getText(source) === "import.meta.url" && originalNames.has(file)) {
+      if (ts.isPropertyAccessExpression(node) && node.getText(source) === "import.meta.url") {
         edit(node, sourceURL); return;
       }
       if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "__vite__mapDeps") {
@@ -165,11 +183,11 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     code = code.replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, "");
     transformed.set(file, code);
   }
-  const independentScripts = new Set(Object.values(scriptURLs));
-  for (const [file, code] of transformed) if (!independentScripts.has(file)) await writeFile(path.join(root, file), code);
+  for (const [file, code] of transformed) await writeFile(path.join(root, file), code);
   await writeFile(path.join(root, "src/embedded-files.json"), JSON.stringify(assets, null, 2) + "\n");
   await writeFile(path.join(root, "src/embedded-scripts.json"), JSON.stringify(scriptURLs, null, 2) + "\n");
-  const loaders = [...modules].map(([name, file]) => `${JSON.stringify(name)}: () => import(${JSON.stringify("./" + path.posix.relative("src", file))})`).join(",\n");
+  await writeFile(path.join(root, "src/embedded-classic.json"), JSON.stringify(classicScripts, null, 2) + "\n");
+  const loaders = [...modules].filter(([name]) => dynamicModules.has(name) && !Object.hasOwn(scriptURLs, name)).map(([name, file]) => `${JSON.stringify(name)}: () => import(${JSON.stringify("./" + path.posix.relative("src", file))})`).join(",\n");
   await writeFile(path.join(root, "src/inline-runtime.ts"), runtimeSource(loaders));
   const main = path.join(root, "src/main.ts");
   await writeFile(main, 'import "./inline-runtime";\n' + await readFile(main, "utf8"));
@@ -221,6 +239,8 @@ function runtimeSource(loaders: string): string {
   return `import assets, { scripts } from "virtual:vitality-assets";
 const root = new URL(import.meta.env.BASE_URL, location.href);
 const modules: Record<string, () => Promise<unknown>> = {${loaders}};
+function installEmbedded(assets, scripts, rootHref, modules = {}) {
+const root = new URL(rootHref);
 const own = (object: object, key: string) => Object.prototype.hasOwnProperty.call(object, key);
 function key(value: string | URL, from = root.href) {
   const url = new URL(String(value), from);
@@ -230,10 +250,14 @@ function key(value: string | URL, from = root.href) {
 const realFetch = globalThis.fetch.bind(globalThis);
 const scriptURLs = new Map<string, string>();
 globalThis.__vitalityEmbedded = {
+  root: root.href,
   asset(name: string) { if (!own(assets, name)) throw new Error("Unknown embedded asset: " + name); return assets[name]; },
   script(name: string) {
     if (!own(scripts, name)) throw new Error("Unknown embedded script: " + name);
-    if (!scriptURLs.has(name)) scriptURLs.set(name, URL.createObjectURL(new Blob([Uint8Array.from(atob(scripts[name]), c => c.charCodeAt(0))], {type: "text/javascript"})));
+    if (!scriptURLs.has(name)) {
+      const setup = "if(!globalThis.__vitalityEmbedded)(" + installEmbedded.toString() + ")(" + JSON.stringify(assets) + "," + JSON.stringify(scripts) + "," + JSON.stringify(root.href) + ");\\n";
+      scriptURLs.set(name, URL.createObjectURL(new Blob([setup, Uint8Array.from(atob(scripts[name]), c => c.charCodeAt(0))], {type: "text/javascript"})));
+    }
     return scriptURLs.get(name)!;
   },
   import(value: string | URL, from: string, options?: object) {
@@ -252,5 +276,21 @@ globalThis.fetch = async (input, init) => {
   }
   return realFetch(input, init);
 };
+if (typeof globalThis.importScripts === "function") {
+  const original = globalThis.importScripts.bind(globalThis);
+  globalThis.importScripts = (...urls) => original(...urls.map(value => {
+    const name = key(value);
+    return name && own(scripts, name) ? globalThis.__vitalityEmbedded.script(name) : value;
+  }));
+}
+if (typeof XMLHttpRequest !== "undefined") {
+  const open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, ...args) {
+    const name = key(url);
+    return open.call(this, method, name && own(assets, name) ? assets[name] : url, ...args);
+  };
+}
+}
+installEmbedded(assets, scripts, root.href, modules);
 `;
 }

@@ -59,6 +59,11 @@ function webPath(value: string): string {
   return value.split(path.sep).join("/");
 }
 
+async function isGeneratedWrapper(directory: string): Promise<boolean> {
+  try { return Boolean(JSON.parse(await readFile(path.join(directory, "package.json"), "utf8")).vitality?.schemaVersion); }
+  catch { return false; }
+}
+
 export async function resolveSourceEntry(source: string): Promise<SourceEntry> {
   const rootIndex = path.join(source, "index.html");
   try {
@@ -81,6 +86,7 @@ export async function resolveSourceEntry(source: string): Promise<SourceEntry> {
       const absolute = path.join(current, entry.name);
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
+        if (await isGeneratedWrapper(absolute)) continue;
         if (!entrySearchExcludedDirectoryNames.has(entry.name)) pending.push(absolute);
         continue;
       }
@@ -162,7 +168,7 @@ async function inventory(source: string, output: string, temporary: string): Pro
       }
       const relative = path.relative(source, absolute);
       const parts = relative.split(path.sep);
-      if (entry.isDirectory() && parts.some((part) => excludedDirectoryNames.has(part))) {
+      if (entry.isDirectory() && (await isGeneratedWrapper(absolute) || parts.some((part, index) => excludedDirectoryNames.has(part) && (part !== "tools" || index === 0)))) {
         excludedEntries += 1;
         continue;
       }

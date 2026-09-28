@@ -1,11 +1,13 @@
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { build, type Plugin } from "vite";
 
 // Copied into opt-in wrappers. This runs during the user's Vite command, never give.
 export function embeddedAssets(root: string): Plugin {
   const files: Record<string, string> = JSON.parse(readFileSync(path.join(root, "src/embedded-files.json"), "utf8"));
   const scripts: Record<string, string> = JSON.parse(readFileSync(path.join(root, "src/embedded-scripts.json"), "utf8"));
+  const classicPath = path.join(root, "src/embedded-classic.json");
+  const classic: Record<string, string> = existsSync(classicPath) ? JSON.parse(readFileSync(classicPath, "utf8")) : {};
   const types: Record<string, string> = {
     ".json": "application/json", ".webmanifest": "application/manifest+json", ".css": "text/css",
     ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -71,7 +73,12 @@ export function embeddedAssets(root: string): Plugin {
     async load(id) {
       if (id !== "\0vitality-assets") return;
       const scriptData: Record<string, string> = {};
+      for (const [name, file] of Object.entries(classic)) {
+        this.addWatchFile(path.resolve(root, file));
+        scriptData[name] = readFileSync(path.resolve(root, file)).toString("base64");
+      }
       for (const [name, file] of Object.entries(scripts)) {
+        if (Object.hasOwn(scriptData, name)) continue;
         this.addWatchFile(path.resolve(root, file));
         // URL-based workers/scripts need an independent bundle, embedded in the
         // main payload rather than emitted as a separate deployment file.
@@ -85,7 +92,20 @@ export function embeddedAssets(root: string): Plugin {
         }
         scriptData[name] = Buffer.from(outputs[0].code).toString("base64");
       }
-      return "export const scripts = " + JSON.stringify(scriptData) + ";\nexport default " + JSON.stringify(Object.fromEntries(Object.keys(files).map(name => [name, encode(name)]))) + ";";
+      // Original and copied paths can address the same binary; store its bytes once.
+      const values = new Map<string, string>();
+      const declarations: string[] = [];
+      const entries = Object.keys(files).map(name => {
+        const data = encode(name);
+        let variable = values.get(data);
+        if (!variable) {
+          variable = "asset" + values.size;
+          values.set(data, variable);
+          declarations.push("const " + variable + " = " + JSON.stringify(data) + ";");
+        }
+        return JSON.stringify(name) + ":" + variable;
+      });
+      return "export const scripts = " + JSON.stringify(scriptData) + ";\n" + declarations.join("\n") + "\nexport default {" + entries.join(",") + "};";
     },
     transformIndexHtml: { order: "pre", handler(html) {
       return html.replace(/%VITALITY_ASSET:([^%]+)%/g, (_all, name: string) => encode(Buffer.from(name, "base64url").toString("utf8")));
