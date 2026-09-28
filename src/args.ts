@@ -105,6 +105,13 @@ export function parseArguments(arguments_: string[]): CliOptions {
       case "--no-inline-assets":
         options.inlineAssets = false;
         break;
+      case "--no-public":
+      case "--nopublic": {
+        const found = optionalBoolean(arguments_, index, name, attached);
+        options.noPublic = found.value;
+        index = found.nextIndex;
+        break;
+      }
       case "--dry-run":
         options.dryRun = true;
         break;
@@ -134,6 +141,7 @@ Options:
   -b, --base PATH          Public base: /, /project/, ./, or an http(s) URL
       --inline [yes|no]    Generate assetsInlineLimit: Infinity (default: ask/No)
       --no-inline          Keep Vite's normal asset inline limit
+      --no-public [yes|no] Embed URL-loaded assets too; no public copy (implies inline)
       --dry-run            Validate and show the operation without writing
   -h, --help               Show this help
   -v, --version            Show the Vitality and bundled Vite versions

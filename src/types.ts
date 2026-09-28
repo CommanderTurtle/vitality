@@ -6,6 +6,7 @@ export interface CliOptions {
   output?: string;
   base?: string;
   inlineAssets?: boolean;
+  noPublic?: boolean;
   dryRun: boolean;
   help: boolean;
   version: boolean;
@@ -20,6 +21,7 @@ export interface GiveOptions {
   output: string;
   base: string;
   inlineAssets: boolean;
+  noPublic?: boolean;
   dryRun: boolean;
 }
 

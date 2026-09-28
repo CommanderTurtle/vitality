@@ -13,6 +13,7 @@ The command asks:
 ```text
 Public base path [/]:
 Inline every imported asset (assetsInlineLimit: Infinity)? [y/N]:
+Embed URL-loaded files too (no public directory)? [y/N]:
 ```
 
 It then creates `SOURCE/mywrap` with this shape:
@@ -126,6 +127,11 @@ include `/`, `/project/`, `./`, an empty base, and absolute HTTP(S) bases. This
 is what makes a generated `dist/` suitable for a domain root, a GitHub Pages
 repository path, or an embedded relative directory without post-build editing.
 
+`--base /comfy/` works on any domain serving that path, including
+`https://app.shel.sh/comfy/`. It does not need a separate domain prompt.
+Use `--base https://app.shel.sh/comfy/` only when URLs must name that host
+explicitly. Supplying `--base` skips the base question.
+
 ## Asset inlining
 
 The inline question controls exactly one Vite option:
@@ -134,9 +140,8 @@ The inline question controls exactly one Vite option:
 assetsInlineLimit: Number.POSITIVE_INFINITY
 ```
 
-Answering No leaves Vite's default threshold. Vitality does not implement an
-asset registry, Blob protocol, repository copier, or alternate embedding
-system. Imported-asset behavior remains Vite's behavior.
+Answering No leaves Vite's default threshold. In normal mode, imported-asset
+behavior remains Vite's behavior: this limit does **not** embed `public/`.
 
 When a reachable JSON manifest resolves sibling files by URL at runtime,
 Vitality places that minimal relational JSON graph in Vite's ordinary
@@ -145,6 +150,36 @@ base without turning the rest of the repository into public build output.
 Classic non-module scripts use the same path, with `%BASE_URL%` references in
 generated HTML. Static-host control files at the selected site root (`404.html`,
 `CNAME`, `.nojekyll`, `_headers`, and `_redirects`) are preserved there too.
+
+### No-public mode
+
+```sh
+vitality give -d "PATH" -b "/comfy/" --inline y --no-public
+```
+
+For single-page projects, `--no-public` (also `--nopublic`) embeds URL-loaded
+runtime assets as well. It implies Infinity and cannot be combined with
+`--no-inline`. Existing behavior remains the default when it is not selected.
+
+The wrapper has `publicDir: false`. Native modules and editable TypeScript enter
+the Vite graph; images, fonts, stylesheets, JSON, and other local resources are
+embedded as data URLs. Runtime-loaded modules resolve through a lazy import
+table. URL-addressed worker scripts are bundled into the payload and exposed as
+browser-local Blob URLs. There is no service worker, server, or upstream build
+command. All compiling happens inside `mywrap`, when you run Vite yourself.
+
+Classic HTML scripts keep classic scope; their content is inlined, with CSP
+hashes when a policy exists. Sources, including notices, remain in the wrapper;
+notices and source maps are not deployed as loose assets. The output is
+`index.html`, `assets/index.js`, and optionally `assets/index.css`. The build
+fails if an additional file would be emitted instead of silently copying it.
+
+Inlining trades away separate-file caching and lazy network downloads; a large
+native frontend will produce a large main bundle. This opt-in currently requires
+a single-page entry. Unknown URLs retain their original behavior: no-public is
+not a replacement for a server API, nor a promise to infer remote resources or
+files missing from the detected source graph. Host-specific control files
+such as `_headers` and `CNAME` are not emitted in this compact mode.
 
 ## Detection and preservation
 
@@ -172,6 +207,7 @@ vitality give --dir PATH
   --output PATH
   --base /project/
   --inline yes|no
+  --no-public [yes|no]
   --dry-run
 ```
 

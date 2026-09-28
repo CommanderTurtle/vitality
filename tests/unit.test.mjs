@@ -20,6 +20,8 @@ test("boolean parsing is strict but accepts shell-friendly spellings", () => {
   assert.equal(parseBooleanWord("Y"), true);
   assert.equal(parseBooleanWord("off"), false);
   assert.throws(() => parseBooleanWord("perhaps"), UsageError);
+  assert.equal(parseArguments(["give", "--no-public"]).noPublic, true);
+  assert.equal(parseArguments(["give", "--nopublic=n"]).noPublic, false);
 });
 
 test("normalizes supported Vite bases", () => {

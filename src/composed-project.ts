@@ -9,7 +9,7 @@ const web = (file: string) => file.split(path.sep).join("/");
 const quotes = /(["'])([^"'\r\n]+)\1/g;
 const imports = /\b(?:import\s*(?:[^"'`]*?\sfrom\s*)?|export\s+[^"'`]*?\sfrom\s*|import\s*\()\s*(["'])([^"']+)\1/g;
 
-export async function copyComposition(root: string, wrapper: string, plan: Composition, base: string, inline: boolean): Promise<CopySummary & { config: string }> {
+export async function copyComposition(root: string, wrapper: string, plan: Composition, base: string, inline: boolean, noPublic = false): Promise<CopySummary & { config: string }> {
   const modules = new Map([...plan.files].flatMap(([name, item]) => "module" in item ? [[name, item.module] as const] : []));
   const sourceFiles = new Map<string, string>();
   const sourceText = new Map<string, string>();
@@ -113,7 +113,7 @@ export async function copyComposition(root: string, wrapper: string, plan: Compo
   for (const [name, item] of plan.files) {
     if (name === "index.html" || "module" in item) continue;
     const content = await readItem(name);
-    await write("public/" + name, /\.(?:html?|[cm]?js|json|css)$/i.test(name) ? rebase(String(content)) : content);
+    await write("public/" + name, !noPublic && /\.(?:html?|[cm]?js|json|css)$/i.test(name) ? rebase(String(content)) : content);
   }
   const input: Record<string, string> = { index: "index.html" };
   const routes: Record<string, string> = {};

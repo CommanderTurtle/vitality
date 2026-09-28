@@ -12,7 +12,7 @@ export async function give(options: GiveOptions): Promise<ScaffoldReport> {
   let published = false;
   try {
     const copied = options.composition
-      ? await copyComposition(options.source, temporary, options.composition, options.base, options.inlineAssets)
+      ? await copyComposition(options.source, temporary, options.composition, options.base, options.inlineAssets, options.noPublic)
       : await copyProject(
       options.siteRoot,
       options.sourceIndex,
@@ -43,6 +43,10 @@ export async function give(options: GiveOptions): Promise<ScaffoldReport> {
       // The wrapper owns its Vite commands; source build scripts are not needed.
       for (const name of Object.keys(pkg.scripts)) if (name.startsWith("source:")) delete pkg.scripts[name];
       await writeFile(file, JSON.stringify(pkg, null, 2) + "\n");
+    }
+    if (options.noPublic) {
+      const { embedPublicFiles } = await import("./no-public.js");
+      await embedPublicFiles(temporary, options.base, copied.pages, options.source, options.composition);
     }
     await updateGitignore(temporary);
     await publishTemporary(temporary, options.output);

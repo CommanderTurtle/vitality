@@ -47,12 +47,17 @@ async function resolveGiveOptions(parsed: CliOptions): Promise<GiveOptions> {
     let base = parsed.base;
     if (base === undefined) base = prompt ? await prompt.text("Public base path", "/") : "/";
 
-    let inlineAssets = parsed.inlineAssets;
+    let inlineAssets = parsed.inlineAssets ?? (parsed.noPublic ? true : undefined);
     if (inlineAssets === undefined) {
       inlineAssets = prompt
         ? await prompt.yesNo("Inline every imported asset (assetsInlineLimit: Infinity)?", false)
         : false;
     }
+    const noPublic = parsed.noPublic ?? (prompt
+      ? await prompt.yesNo("Embed URL-loaded files too (no public directory)?", false)
+      : false);
+    if (noPublic && parsed.inlineAssets === false) throw new UsageError("--no-public requires inlining; remove --no-inline");
+    if (noPublic) inlineAssets = true;
     return {
       source,
       siteRoot: entry.root,
@@ -61,6 +66,7 @@ async function resolveGiveOptions(parsed: CliOptions): Promise<GiveOptions> {
       output,
       base: normalizeBase(base),
       inlineAssets,
+      noPublic,
       dryRun: parsed.dryRun,
       ...(composition ? { composition } : {}),
     };
@@ -76,6 +82,7 @@ function printOperation(options: GiveOptions): void {
   console.log(`  wrapper      ${options.output}`);
   console.log(`  base         ${options.base === "" ? "(empty)" : options.base}`);
   console.log(`  asset inline ${options.inlineAssets ? "Infinity" : "Vite default"}`);
+  console.log(`  public files ${options.noPublic ? "embedded (no public copy)" : "preserve URL-loaded files"}`);
   console.log("  dependencies not installed");
   console.log("  dist         not built\n");
 }

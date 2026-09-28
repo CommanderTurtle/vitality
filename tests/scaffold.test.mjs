@@ -121,6 +121,29 @@ test("single-page output is one index, one JavaScript, and one CSS file", async 
   assert.doesNotMatch(html, /fixture-config/u);
 });
 
+test("no-public also preserves ordinary source modules and relative JSON fetches", async context => {
+  const source = await mkdtemp(path.join(os.tmpdir(), "vitality-inline-"));
+  context.after(() => rm(source, { recursive: true, force: true }));
+  await cp(path.join(fixtures, "configured"), source, { recursive: true });
+  await mkdir(path.join(source, "data"));
+  await writeFile(path.join(source, "data/index.json"), '{"entry":"child.json"}');
+  await writeFile(path.join(source, "data/child.json"), '{"answer":42}');
+  await writeFile(path.join(source, "src/main.js"), `
+    const response = await fetch(new URL('../data/index.json', import.meta.url));
+    const manifest = await response.json();
+    if (manifest.entry !== 'child.json') throw new Error('manifest identity changed');
+    const child = await fetch(new URL(manifest.entry, response.url)).then(r => r.json());
+    globalThis.inlineAnswer = child.answer;
+  `);
+  run(process.execPath, [cli, "give", "-d", source, "-b", "/nested/", "--no-public"], repository);
+  const wrapper = path.join(source, "mywrap");
+  await assert.rejects(stat(path.join(wrapper, "public")));
+  run(process.execPath, ["install", "--ignore-scripts"], wrapper);
+  run(process.execPath, ["run", "--bun", "build"], wrapper);
+  assert.deepEqual(await allFiles(path.join(wrapper, "dist")), ["assets/index.css", "assets/index.js", "index.html"]);
+  run(process.execPath, ["-e", `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/nested/');await import('./dist/assets/index.js');if(globalThis.inlineAnswer!==42)throw Error('JSON graph failed');`], wrapper);
+});
+
 test("give promotes a unique shallowest nested index as the site root", async (context) => {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "vitality-nested-root-"));
   context.after(() => rm(temporaryRoot, { recursive: true, force: true }));

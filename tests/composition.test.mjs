@@ -93,3 +93,50 @@ test("unsupported source actions fail closed instead of executing", async contex
   assert.throws(() => detectComposition(source), /Unresolved source expression: fetch/);
   await assert.rejects(stat(path.join(source, 'dist')));
 });
+
+test("no-public embeds URL assets and keeps lazy extension/bootstrap order", async context => {
+  const source = await fixture(context);
+  await writeFile(path.join(source, 'source/native/index.html'), '<html><head><meta http-equiv="Content-Security-Policy" content="script-src \'self\'; style-src \'self\'"><link rel="stylesheet" href="assets/style.css"></head><body><script src="assets/classic.js"></script><script type="module" src="./assets/native.js"></script></body></html>');
+  await writeFile(path.join(source, 'source/native/assets/classic.js'), 'globalThis.classic = true;');
+  await writeFile(path.join(source, 'source/native/assets/style.css'), 'body {background: url(./pixel.svg)}');
+  await writeFile(path.join(source, 'source/native/assets/pixel.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  await writeFile(path.join(source, 'source/native/LICENSE'), 'kept in source, not published');
+  await writeFile(path.join(source, 'source/native/assets/worker.js'), 'import { answer } from "./worker-helper.js"; self.postMessage?.(answer);');
+  await writeFile(path.join(source, 'source/native/assets/worker-helper.js'), 'export const answer = "embedded-worker-ready";');
+  await writeFile(path.join(source, 'source/native/assets/native.js'), `
+    if (globalThis.title !== 'bootstrap') throw new Error('bootstrap ran too late');
+    if (globalThis.extensionLoaded) throw new Error('extension ran too early');
+    const response = await fetch(new URL('../data/config.json', import.meta.url));
+    if (!response.url.endsWith('/site/data/config.json')) throw new Error('JSON response lost its original URL');
+    const config = await response.json();
+    await import(config.extension);
+    globalThis.workerURL = new URL('./worker.js', import.meta.url).href;
+    const worker = await fetch(globalThis.workerURL).then(r => r.text());
+    if (!worker.includes('embedded-worker-ready') || /from[\\s]*['"]\\./.test(worker)) throw new Error('worker not self-contained');
+    globalThis.nativeReady = true;
+  `);
+  await writeFile(path.join(source, 'src/extension.ts'), `
+    if (globalThis.title !== 'bootstrap') throw new Error('extension before bootstrap');
+    globalThis.extensionLoaded = true;
+    export const enabled = true;
+  `);
+  run(['dist/cli.js', 'give', '-d', source, '-b', '/site/', '--inline', 'y', '--no-public']);
+  const wrapper = path.join(source, 'mywrap');
+  await assert.rejects(stat(path.join(wrapper, 'public')));
+  await assert.rejects(stat(path.join(wrapper, 'dist')));
+  await stat(path.join(wrapper, 'src/embedded/LICENSE'));
+  run(['install', '--ignore-scripts'], wrapper);
+  const built = run(['run', '--bun', 'build'], wrapper);
+  assert.doesNotMatch(built.stderr, /can't be bundled|remain unchanged|unresolved/i);
+  assert.deepEqual((await readdir(path.join(wrapper, 'dist'))).sort(), ['assets', 'index.html']);
+  assert.deepEqual(await readdir(path.join(wrapper, 'dist/assets')), ['index.js']);
+  const html = await readFile(path.join(wrapper, 'dist/index.html'), 'utf8');
+  assert.match(html, /data:text\/css;base64/);
+  assert.match(html, /sha256-/);
+  assert.doesNotMatch(html, /src="[^"\n]*classic\.js/);
+  const script = await readFile(path.join(wrapper, 'dist/assets/index.js'), 'utf8');
+  assert.doesNotMatch(script, /kept in source, not published/);
+  // Bun can execute this DOM-free fixture's bundle and detect premature evaluation.
+  const result = run(['-e', `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/site/');await import('./dist/assets/index.js');if(!globalThis.nativeReady||!globalThis.extensionLoaded)throw Error('not initialized');console.log('ordered');`], wrapper);
+  assert.match(result.stdout, /ordered/);
+});
