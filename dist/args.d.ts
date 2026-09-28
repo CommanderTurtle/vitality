@@ -1,8 +1,0 @@
-import type { CliOptions } from "./types.js";
-export declare class UsageError extends Error {
-    name: string;
-}
-export declare function parseBooleanWord(value: string, optionName?: string): boolean;
-export declare function parseArguments(arguments_: string[]): CliOptions;
-export declare const helpText = "Vitality \u2014 wrap a standalone webapp in a ready-to-run Vite project.\n\nUsage:\n  vitality give --dir PATH\n  vitality give --dir PATH --base /project/ --inline yes\n\nThe default output is PATH/mywrap. The source is never modified, and no dist\nbundle is created by give. Afterward:\n\n  cd PATH/mywrap\n  bun run serve        # Vite development server\n  bun run build        # production bundle in dist/\n\nOptions:\n  -d, --dir PATH           Source site or containing repo (literal filesystem path)\n  -o, --output PATH        Wrapper destination (default: SOURCE/mywrap)\n  -b, --base PATH          Public base: /, /project/, ./, or an http(s) URL\n      --inline [yes|no]    Generate assetsInlineLimit: Infinity (default: ask/No)\n      --no-inline          Keep Vite's normal asset inline limit\n      --dry-run            Validate and show the operation without writing\n  -h, --help               Show this help\n  -v, --version            Show the Vitality and bundled Vite versions\n\nBoolean options accept y/n, yes/no, true/false, on/off, or 1/0.";
-//# sourceMappingURL=args.d.ts.map
