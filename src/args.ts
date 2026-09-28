@@ -101,6 +101,12 @@ export function parseArguments(arguments_: string[]): CliOptions {
         index = found.nextIndex;
         break;
       }
+      case "--build-output": {
+        const found = requireValue(arguments_, index, name, attached);
+        options.buildOutput = found.value;
+        index = found.nextIndex;
+        break;
+      }
       case "--no-inline":
       case "--no-inline-assets":
         options.inlineAssets = false;
@@ -134,6 +140,7 @@ Options:
   -b, --base PATH          Public base: /, /project/, ./, or an http(s) URL
       --inline [yes|no]    Generate assetsInlineLimit: Infinity (default: ask/No)
       --no-inline          Keep Vite's normal asset inline limit
+      --build-output PATH  Existing builder's output directory (default: dist)
       --dry-run            Validate and show the operation without writing
   -h, --help               Show this help
   -v, --version            Show the Vitality and bundled Vite versions

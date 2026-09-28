@@ -53,13 +53,14 @@ export interface SourceEntry {
   index: string;
   root: string;
   relative: string;
+  sourceBuild?: { outDir: string };
 }
 
 function webPath(value: string): string {
   return value.split(path.sep).join("/");
 }
 
-export async function resolveSourceEntry(source: string): Promise<SourceEntry> {
+export async function resolveSourceEntry(source: string, buildOutput = "dist"): Promise<SourceEntry> {
   const rootIndex = path.join(source, "index.html");
   try {
     const metadata = await stat(rootIndex);
@@ -70,6 +71,23 @@ export async function resolveSourceEntry(source: string): Promise<SourceEntry> {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw new UsageError(`could not inspect source index.html: ${(error as Error).message}`);
     }
+  }
+
+  let pkg;
+  try { pkg = JSON.parse(await readFile(path.join(source, "package.json"), "utf8")); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new UsageError(`could not read source package.json: ${(error as Error).message}`);
+    }
+  }
+  // Without a root HTML entry, a package builder owns assembly of the app.
+  // Vendor HTML and stale output cannot substitute for that project recipe.
+  if (typeof pkg?.scripts?.build === "string" && pkg.scripts.build.trim()) {
+    if (path.isAbsolute(buildOutput) || /[:\0]/u.test(buildOutput) || buildOutput.split(/[\\/]/u).some((part) =>
+      !part || part.startsWith(".") || ["node_modules", "src", "source", "scripts", "mywrap"].includes(part.toLowerCase()))) {
+      throw new UsageError("--build-output must name a relative generated directory, not source, dependencies or a parent directory");
+    }
+    return { root: source, index: "", relative: "package.json#scripts.build", sourceBuild: { outDir: buildOutput } };
   }
 
   const candidates: string[] = [];

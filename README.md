@@ -29,7 +29,9 @@ mywrap/
 └── README.md
 ```
 
-If `SOURCE/index.html` does not exist, Vitality searches for nested site roots.
+If `SOURCE/index.html` does not exist and `package.json` has a `build` script,
+Vitality preserves that project's build inputs instead (see below). Otherwise,
+Vitality searches for nested site roots.
 The unique shallowest `index.html` becomes the entry, so repository layouts
 such as `docs/index.html` can still be given from the repository root. A root
 entry always wins. If two equally shallow candidates exist, Vitality refuses
@@ -153,6 +155,30 @@ Vitality:
 
 The source directory is never changed.
 
+## Projects with their own builder
+
+Without a root `index.html`, a package's `build` script is the project entry.
+This supports Bun builders that assemble vendor HTML, extensions and local
+TypeScript together. A `bunfig.toml` alone is not a build entry.
+
+`give` copies the inputs into `mywrap`, omitting existing build output, caches,
+dependencies and secrets. It does not run the builder or require a `dist/`.
+Original source paths and configs are preserved; Vitality adds
+`vite.vitality.config.ts` and keeps the build command under `source:build`
+(or a numbered alias if that name is already taken).
+
+Inside the wrapper, run `bun install`, then `bun run build`, then optionally
+`bun run serve`. The manual build runs the preserved builder there and packages
+its output for the selected base. The original project is not built or changed.
+Output is expected in `dist/index.html`; use `--build-output DIR` if the source
+builder writes elsewhere. The wrapper's final output is always `dist/`.
+
+Native compiled modules, workers and URL-loaded assets retain their filenames
+and are not re-bundled or inlined. Only literal root URLs naming emitted files
+are rebased; API and remote URLs are left alone. The builder also receives
+`VITALITY_BASE` and `BASE_PATH`. Dynamically constructed absolute URLs still
+need support from the source builder. HTML-only conversion remains unchanged.
+
 ## Options
 
 ```text
@@ -160,6 +186,7 @@ vitality give --dir PATH
   --output PATH
   --base /project/
   --inline yes|no
+  --build-output DIR
   --dry-run
 ```
 
@@ -177,7 +204,8 @@ bun run test
 The tests cover literal Windows-safe paths, base normalization, uninstalled
 generation, JS/JSX/MJS-to-TypeScript entry mapping, reachable versus orphan
 HTML, multi-page routing, source-script preservation, large-asset inlining,
-secret exclusion, exact single-page `dist/` topology, and transactional output.
+secret exclusion, exact single-page `dist/` topology, transactional output, and
+deferred package builds with preserved inputs and deployment-base rewriting.
 
 ## License
 

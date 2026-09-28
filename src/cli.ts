@@ -33,7 +33,7 @@ async function resolveGiveOptions(parsed: CliOptions): Promise<GiveOptions> {
     const source = await resolveSourceDirectory(directory, process.cwd());
     const output = await resolveWrapperDirectory(parsed.output, source);
     await validateWrapperLayout(source, output);
-    const entry = await resolveSourceEntry(source);
+    const entry = await resolveSourceEntry(source, parsed.buildOutput);
 
     let base = parsed.base;
     if (base === undefined) base = prompt ? await prompt.text("Public base path", "/") : "/";
@@ -53,6 +53,7 @@ async function resolveGiveOptions(parsed: CliOptions): Promise<GiveOptions> {
       base: normalizeBase(base),
       inlineAssets,
       dryRun: parsed.dryRun,
+      ...(entry.sourceBuild ? { sourceBuild: entry.sourceBuild } : {}),
     };
   } finally {
     prompt?.close();
@@ -63,6 +64,7 @@ function printOperation(options: GiveOptions): void {
   console.log("\nVitality give");
   console.log(`  source       ${options.source}`);
   console.log(`  entry        ${options.sourceEntry}`);
+  if (options.sourceBuild) console.log(`  build output ${options.sourceBuild.outDir}/ (deferred to your manual wrapper build)`);
   console.log(`  wrapper      ${options.output}`);
   console.log(`  base         ${options.base === "" ? "(empty)" : options.base}`);
   console.log(`  asset inline ${options.inlineAssets ? "Infinity" : "Vite default"}`);
@@ -97,8 +99,13 @@ async function main(): Promise<void> {
   console.log("\nNext:");
   console.log(`  cd ${JSON.stringify(options.output)}`);
   console.log("  bun install");
-  console.log("  bun run serve   # development");
-  console.log("  bun run build   # writes dist/");
+  if (options.sourceBuild) {
+    console.log("  bun run build   # runs the preserved builder inside this wrapper");
+    console.log("  bun run serve   # previews dist/");
+  } else {
+    console.log("  bun run serve   # development");
+    console.log("  bun run build   # writes dist/");
+  }
 }
 
 main().catch((error: unknown) => {

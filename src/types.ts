@@ -3,6 +3,7 @@ export interface CliOptions {
   directory?: string;
   output?: string;
   base?: string;
+  buildOutput?: string;
   inlineAssets?: boolean;
   dryRun: boolean;
   help: boolean;
@@ -18,6 +19,7 @@ export interface GiveOptions {
   base: string;
   inlineAssets: boolean;
   dryRun: boolean;
+  sourceBuild?: { outDir: string };
 }
 
 export interface ScaffoldReport {
