@@ -40,8 +40,7 @@ export async function writeWrapperPackage(
   inlineAssets: boolean,
   pageCount: number,
   sourceEntry: string,
-  sourceBuild = false,
-): Promise<string> {
+): Promise<void> {
   const packagePath = path.join(source, "package.json");
   let original: JsonObject = {};
   try {
@@ -56,23 +55,18 @@ export async function writeWrapperPackage(
   }
 
   const sourceScripts = objectProperty(original, "scripts");
-  const reservedScripts = ["dev", "serve", "build", "preview", "check"];
-  const scripts: JsonObject = sourceBuild
-    ? Object.fromEntries(Object.entries(sourceScripts).filter(([name]) => !reservedScripts.includes(name))) : {};
-  let buildScript = "";
-  for (const reserved of sourceBuild ? reservedScripts : ["dev", "serve", "build", "preview"]) {
+  const scripts: JsonObject = {};
+  for (const reserved of ["dev", "serve", "build", "preview"]) {
     const existing = sourceScripts[reserved];
     if (typeof existing === "string" && existing !== "") {
-      const alias = availableScriptName(scripts, `source:${reserved}`);
-      scripts[alias] = existing;
-      if (reserved === "build") buildScript = alias;
+      scripts[availableScriptName(scripts, `source:${reserved}`)] = existing;
     }
   }
-  scripts.dev = sourceBuild ? "vite preview --config vite.vitality.config.ts" : "vite";
-  scripts.serve = scripts.dev;
-  scripts.build = sourceBuild ? "vite build --config vite.vitality.config.ts" : "vite build";
-  scripts.preview = sourceBuild ? "vite preview --config vite.vitality.config.ts" : "vite preview";
-  scripts.check = sourceBuild ? "tsc -p tsconfig.vitality.json --noEmit --noCheck" : "tsc --noEmit --noCheck";
+  scripts.dev = "vite";
+  scripts.serve = "vite";
+  scripts.build = "vite build";
+  scripts.preview = "vite preview";
+  scripts.check = "tsc --noEmit --noCheck";
 
   const dependencies = objectProperty(original, "dependencies");
   delete dependencies.vite;
@@ -93,16 +87,14 @@ export async function writeWrapperPackage(
       schemaVersion: 3,
       base,
       assetsInlineLimit: inlineAssets ? "Infinity" : "vite-default",
-      generatedConfig: sourceBuild ? "vite.vitality.config.ts" : "vite.config.ts",
-      sourceRoot: sourceBuild ? "." : "src/app",
-      ...(sourceBuild ? { mode: "project-build", buildScript } : {}),
+      generatedConfig: "vite.config.ts",
+      sourceRoot: "src/app",
       sourceEntry,
       pages: pageCount,
     },
   };
   if (Object.keys(dependencies).length === 0) delete generated.dependencies;
   await writeFile(path.join(wrapper, "package.json"), `${JSON.stringify(generated, null, 2)}\n`, "utf8");
-  return buildScript;
 }
 
 export async function updateGitignore(wrapper: string): Promise<void> {

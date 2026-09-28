@@ -33,8 +33,19 @@ If `SOURCE/index.html` does not exist, Vitality searches for nested site roots.
 The unique shallowest `index.html` becomes the entry, so repository layouts
 such as `docs/index.html` can still be given from the repository root. A root
 entry always wins. If two equally shallow candidates exist, Vitality refuses
-to guess; point `--dir` directly at the intended site directory. Bun projects
-with no unique HTML entry have an additional fallback (see below).
+to guess; point `--dir` directly at the intended site directory.
+
+For TypeScript projects that assemble HTML through a Bun script instead of
+Vite, Vitality can additionally read the script's local file mappings and data
+expressions. This runs only when normal entry detection cannot resolve a site.
+The source script is never executed, compiled, or retained as a build hook.
+Unsupported expressions produce a diagnostic instead of running arbitrary code.
+
+The resulting `mywrap` uses ordinary TypeScript sources and Vite directly, with
+the same `--base` and `--inline` options. Local bootstraps and extensions become
+Vite module entries; existing URL-loaded vendor graphs keep their public paths.
+Their filenames are preserved, while Vite minifies and bundles the editable
+module graph and applies the selected inline limit to its imported assets.
 
 Local ES-module graphs are moved beneath `src/app/`. Detected `.js`, `.jsx`,
 and `.mjs` modules become `.ts`, `.tsx`, and `.mts`; their local imports and
@@ -154,33 +165,6 @@ Vitality:
 
 The source directory is never changed.
 
-## Bun project fallback
-
-Root HTML and unique nested-site detection take precedence, including for
-projects with build scripts. Only when those checks cannot choose an entry,
-Vitality recognizes a Bun project by its build command, `packageManager`, or
-`bunfig.toml`, and preserves its package build recipe. Both Bun evidence and a
-build script are required. This supports projects that assemble multiple HTML
-inputs, extensions and local TypeScript without changing ordinary conversion.
-
-`give` copies the inputs into `mywrap`, omitting existing build output, caches,
-dependencies and secrets. It does not run the builder or require a `dist/`.
-Original source paths and configs are preserved; Vitality adds
-`vite.vitality.config.ts` and keeps the build command under `source:build`
-(or a numbered alias if that name is already taken).
-
-Inside the wrapper, run `bun install`, then `bun run build`, then optionally
-`bun run serve`. The manual build runs the preserved builder there and packages
-its output for the selected base. The original project is not built or changed.
-Output is expected in `dist/index.html`; use `--build-output DIR` if the source
-builder writes elsewhere. The wrapper's final output is always `dist/`.
-
-Native compiled modules, workers and URL-loaded assets retain their filenames
-and are not re-bundled or inlined. Only literal root URLs naming emitted files
-are rebased; API and remote URLs are left alone. The builder also receives
-`VITALITY_BASE` and `BASE_PATH`. Dynamically constructed absolute URLs still
-need support from the source builder. HTML-only conversion remains unchanged.
-
 ## Options
 
 ```text
@@ -188,7 +172,6 @@ vitality give --dir PATH
   --output PATH
   --base /project/
   --inline yes|no
-  --build-output DIR
   --dry-run
 ```
 
@@ -206,8 +189,7 @@ bun run test
 The tests cover literal Windows-safe paths, base normalization, uninstalled
 generation, JS/JSX/MJS-to-TypeScript entry mapping, reachable versus orphan
 HTML, multi-page routing, source-script preservation, large-asset inlining,
-secret exclusion, exact single-page `dist/` topology, transactional output, and
-deferred package builds with preserved inputs and deployment-base rewriting.
+secret exclusion, exact single-page `dist/` topology, and transactional output.
 
 ## License
 

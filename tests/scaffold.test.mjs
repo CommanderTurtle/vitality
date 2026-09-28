@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -188,75 +188,4 @@ test("give refuses to overwrite an existing wrapper", async (context) => {
   });
   assert.notEqual(second.status, 0);
   assert.match(second.stderr, /already exists/u);
-});
-
-test("a root package builder is deferred, preserves its inputs, and works without dist", { timeout: 30_000 }, async (context) => {
-  const source = await mkdtemp(path.join(os.tmpdir(), "vitality-unbuilt-"));
-  context.after(() => rm(source, { recursive: true, force: true }));
-  for (const directory of ["source/native", "source/upstream", "src", ".work/stale"]) {
-    await mkdir(path.join(source, directory), { recursive: true });
-  }
-  for (const directory of ["source/native", "source/upstream", ".work/stale"]) {
-    await writeFile(path.join(source, directory, "index.html"), "<!doctype html><title>vendor input</title>");
-  }
-  const originalPackage = JSON.stringify({ name: "builder-fixture", type: "module", scripts: {
-    build: "bun run assemble", assemble: "bun build.ts", "source:build": "echo preserved helper",
-  } });
-  await writeFile(path.join(source, "package.json"), originalPackage);
-  await writeFile(path.join(source, "src", "editor.ts"), 'export const title = "Built editor";');
-  await writeFile(path.join(source, "bunfig.toml"), '[test]\nroot = "tests"\n');
-  await writeFile(path.join(source, ".env.private"), "SECRET=must-not-copy");
-  await writeFile(path.join(source, "build.ts"), [
-    'import { title } from "./src/editor";',
-    'await Bun.write("ran-build.txt", import.meta.dir);',
-    'await Bun.write("dist/index.html", \'<html><head><title>\' + title + \'</title><script type="module" src="/assets/editor.js"></script></head><body></body></html>\');',
-    'await Bun.write("dist/assets/editor.js", \'export const file = "/assets/data.json"; export const api = "/api/prompt";\');',
-    'await Bun.write("dist/assets/data.json", \'{"value":true}\');',
-    'await Bun.write("dist/assets/style.css", "body{background:url(/assets/pixel.svg)}");',
-    'await Bun.write("dist/assets/pixel.svg", "<svg/>");',
-  ].join("\n"));
-  const created = run(process.execPath, [cli, "give", "-d", source, "-b", "/comfy/", "--inline", "y"], repository);
-  assert.match(created.stdout, /package\.json#scripts\.build/u);
-  const wrapper = path.join(source, "mywrap");
-  await assert.rejects(stat(path.join(source, "ran-build.txt")));
-  await assert.rejects(stat(path.join(wrapper, "ran-build.txt")));
-  await assert.rejects(stat(path.join(wrapper, "dist")));
-  await assert.rejects(stat(path.join(wrapper, "node_modules")));
-  await assert.rejects(stat(path.join(wrapper, ".work")));
-  await assert.rejects(stat(path.join(wrapper, ".env.private")));
-  assert.equal(await readFile(path.join(wrapper, "src/editor.ts"), "utf8"), await readFile(path.join(source, "src/editor.ts"), "utf8"));
-  assert.equal(await readFile(path.join(wrapper, "bunfig.toml"), "utf8"), '[test]\nroot = "tests"\n');
-  const pkg = JSON.parse(await readFile(path.join(wrapper, "package.json"), "utf8"));
-  assert.equal(pkg.scripts.assemble, "bun build.ts");
-  assert.equal(pkg.scripts["source:build"], "echo preserved helper");
-  assert.equal(pkg.vitality.buildScript, "source:build:2");
-  assert.equal(pkg.vitality.sourceRoot, ".");
-  assert.equal(pkg.vitality.mode, "project-build");
-  assert.match(pkg.scripts.build, /vite build --config vite\.vitality\.config\.ts/u);
-
-  // Only this isolated fixture is built; give itself must remain non-executing.
-  run("bun", ["install"], wrapper);
-  run("bun", ["run", "--bun", "build"], wrapper);
-  const html = await readFile(path.join(wrapper, "dist", "index.html"), "utf8");
-  assert.match(html, /Built editor/u);
-  assert.match(html, /<base href="\/comfy\/">/u);
-  assert.match(html, /src="\/comfy\/assets\/editor\.js"/u);
-  assert.match(await readFile(path.join(wrapper, "dist/assets/editor.js"), "utf8"), /"\/comfy\/assets\/data\.json"/u);
-  assert.match(await readFile(path.join(wrapper, "dist/assets/editor.js"), "utf8"), /"\/api\/prompt"/u);
-  assert.match(await readFile(path.join(wrapper, "dist/assets/style.css"), "utf8"), /url\(\/comfy\/assets\/pixel\.svg\)/u);
-  assert.equal(await realpath(await readFile(path.join(wrapper, "ran-build.txt"), "utf8")), await realpath(wrapper));
-  assert.equal(await readFile(path.join(source, "package.json"), "utf8"), originalPackage);
-  await assert.rejects(stat(path.join(source, "dist")));
-  await assert.rejects(stat(path.join(source, "ran-build.txt")));
-  assert.deepEqual(await allFiles(path.join(wrapper, "dist")), [
-    "assets/data.json", "assets/editor.js", "assets/pixel.svg", "assets/style.css", "index.html",
-  ]);
-
-  // Stale generated HTML does not change selection of the project recipe.
-  await mkdir(path.join(source, "dist"));
-  await writeFile(path.join(source, "dist/index.html"), "STALE_DIST");
-  const dryRun = run(process.execPath, [cli, "give", "-d", source, "-o", "another", "--dry-run"], repository);
-  assert.match(dryRun.stdout, /package\.json#scripts\.build/u);
-  assert.equal(await readFile(path.join(source, "dist/index.html"), "utf8"), "STALE_DIST");
-  await assert.rejects(stat(path.join(source, "another")));
 });

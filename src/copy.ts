@@ -53,14 +53,13 @@ export interface SourceEntry {
   index: string;
   root: string;
   relative: string;
-  sourceBuild?: { outDir: string };
 }
 
 function webPath(value: string): string {
   return value.split(path.sep).join("/");
 }
 
-export async function resolveSourceEntry(source: string, buildOutput = "dist"): Promise<SourceEntry> {
+export async function resolveSourceEntry(source: string): Promise<SourceEntry> {
   const rootIndex = path.join(source, "index.html");
   try {
     const metadata = await stat(rootIndex);
@@ -89,45 +88,13 @@ export async function resolveSourceEntry(source: string, buildOutput = "dist"): 
     }
   }
 
+  if (candidates.length === 0) {
+    throw new UsageError(`source directory contains no index.html: ${source}`);
+  }
   candidates.sort((left, right) => left.localeCompare(right));
   const depth = (candidate: string): number => path.relative(source, candidate).split(path.sep).length;
   const shallowestDepth = Math.min(...candidates.map(depth));
   const shallowest = candidates.filter((candidate) => depth(candidate) === shallowestDepth);
-  // Preserve the existing root/nested-site detector before adding a fallback.
-  const index = shallowest[0];
-  if (shallowest.length === 1 && index !== undefined) {
-    return { index, root: path.dirname(index), relative: webPath(path.relative(source, index)) };
-  }
-
-  let pkg;
-  try { pkg = JSON.parse(await readFile(path.join(source, "package.json"), "utf8")); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new UsageError(`could not read source package.json: ${(error as Error).message}`);
-    }
-  }
-  const build = pkg?.scripts?.build;
-  if (typeof build === "string" && build.trim()) {
-    let bunProject = /^\s*bun(?:\.exe)?\s/u.test(build)
-      || (typeof pkg.packageManager === "string" && pkg.packageManager.startsWith("bun@"));
-    if (!bunProject) {
-      try { bunProject = (await stat(path.join(source, "bunfig.toml"))).isFile(); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    }
-    // Bun projects can assemble several HTML inputs without a single site entry.
-    // A generic build script alone must not bypass the existing ambiguity checks.
-    if (bunProject) {
-      if (path.isAbsolute(buildOutput) || /[:\0]/u.test(buildOutput) || buildOutput.split(/[\\/]/u).some((part) =>
-        !part || part.startsWith(".") || ["node_modules", "src", "source", "scripts", "mywrap"].includes(part.toLowerCase()))) {
-        throw new UsageError("--build-output must name a relative generated directory, not source, dependencies or a parent directory");
-      }
-      return { root: source, index: "", relative: "package.json#scripts.build", sourceBuild: { outDir: buildOutput } };
-    }
-  }
-
-  if (candidates.length === 0) {
-    throw new UsageError(`source directory contains no index.html: ${source}`);
-  }
   if (shallowest.length > 1) {
     const choices = shallowest.map((candidate) => `  - ${webPath(path.relative(source, candidate))}`).join("\n");
     throw new UsageError(
@@ -136,7 +103,13 @@ export async function resolveSourceEntry(source: string, buildOutput = "dist"): 
     );
   }
 
-  throw new Error("nested index discovery returned no candidate");
+  const index = shallowest[0];
+  if (index === undefined) throw new Error("nested index discovery returned no candidate");
+  return {
+    index,
+    root: path.dirname(index),
+    relative: webPath(path.relative(source, index)),
+  };
 }
 
 function isRemoteReference(value: string): boolean {

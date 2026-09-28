@@ -1,9 +1,10 @@
+import type { Composition } from "./composition.js";
+
 export interface CliOptions {
   command?: "give";
   directory?: string;
   output?: string;
   base?: string;
-  buildOutput?: string;
   inlineAssets?: boolean;
   dryRun: boolean;
   help: boolean;
@@ -11,6 +12,7 @@ export interface CliOptions {
 }
 
 export interface GiveOptions {
+  composition?: Composition;
   source: string;
   siteRoot: string;
   sourceIndex: string;
@@ -19,7 +21,6 @@ export interface GiveOptions {
   base: string;
   inlineAssets: boolean;
   dryRun: boolean;
-  sourceBuild?: { outDir: string };
 }
 
 export interface ScaffoldReport {
