@@ -42,7 +42,7 @@ test("path containment is segment-aware", () => {
   assert.equal(containsPath(root, path.resolve("alphabet")), false);
 });
 
-test("package build selection validates output paths and leaves root HTML precedence intact", async (context) => {
+test("Bun fallback validates output paths and preserves root and nested HTML precedence", async (context) => {
   const source = await mkdtemp(path.join(os.tmpdir(), "vitality-build-entry-"));
   context.after(() => rm(source, { recursive: true, force: true }));
   await writeFile(path.join(source, "package.json"), '{"scripts":{"build":"bun build.ts"}}');
@@ -54,7 +54,25 @@ test("package build selection validates output paths and leaves root HTML preced
   }
   await mkdir(path.join(source, "nested"));
   await writeFile(path.join(source, "nested/index.html"), "nested");
+  assert.equal((await resolveSourceEntry(source)).relative, "nested/index.html");
+  assert.equal((await resolveSourceEntry(source)).sourceBuild, undefined);
   await writeFile(path.join(source, "index.html"), "root");
   assert.equal((await resolveSourceEntry(source)).relative, "index.html");
   assert.equal((await resolveSourceEntry(source)).sourceBuild, undefined);
+});
+
+test("generic build scripts and bunfig alone do not bypass ambiguous entry detection", async (context) => {
+  const source = await mkdtemp(path.join(os.tmpdir(), "vitality-bun-fallback-"));
+  context.after(() => rm(source, { recursive: true, force: true }));
+  for (const directory of ["app", "docs"]) {
+    await mkdir(path.join(source, directory));
+    await writeFile(path.join(source, directory, "index.html"), directory);
+  }
+  await writeFile(path.join(source, "package.json"), '{"scripts":{"build":"tsc"}}');
+  await assert.rejects(resolveSourceEntry(source), /multiple equally shallow/u);
+  await writeFile(path.join(source, "bunfig.toml"), '[test]\nroot = "tests"\n');
+  await writeFile(path.join(source, "package.json"), '{}');
+  await assert.rejects(resolveSourceEntry(source), /multiple equally shallow/u);
+  await writeFile(path.join(source, "package.json"), '{"scripts":{"build":"vite build"}}');
+  assert.equal((await resolveSourceEntry(source)).relative, "package.json#scripts.build");
 });

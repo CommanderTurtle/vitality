@@ -29,13 +29,12 @@ mywrap/
 └── README.md
 ```
 
-If `SOURCE/index.html` does not exist and `package.json` has a `build` script,
-Vitality preserves that project's build inputs instead (see below). Otherwise,
-Vitality searches for nested site roots.
+If `SOURCE/index.html` does not exist, Vitality searches for nested site roots.
 The unique shallowest `index.html` becomes the entry, so repository layouts
 such as `docs/index.html` can still be given from the repository root. A root
 entry always wins. If two equally shallow candidates exist, Vitality refuses
-to guess; point `--dir` directly at the intended site directory.
+to guess; point `--dir` directly at the intended site directory. Bun projects
+with no unique HTML entry have an additional fallback (see below).
 
 Local ES-module graphs are moved beneath `src/app/`. Detected `.js`, `.jsx`,
 and `.mjs` modules become `.ts`, `.tsx`, and `.mts`; their local imports and
@@ -155,11 +154,14 @@ Vitality:
 
 The source directory is never changed.
 
-## Projects with their own builder
+## Bun project fallback
 
-Without a root `index.html`, a package's `build` script is the project entry.
-This supports Bun builders that assemble vendor HTML, extensions and local
-TypeScript together. A `bunfig.toml` alone is not a build entry.
+Root HTML and unique nested-site detection take precedence, including for
+projects with build scripts. Only when those checks cannot choose an entry,
+Vitality recognizes a Bun project by its build command, `packageManager`, or
+`bunfig.toml`, and preserves its package build recipe. Both Bun evidence and a
+build script are required. This supports projects that assemble multiple HTML
+inputs, extensions and local TypeScript without changing ordinary conversion.
 
 `give` copies the inputs into `mywrap`, omitting existing build output, caches,
 dependencies and secrets. It does not run the builder or require a `dist/`.
