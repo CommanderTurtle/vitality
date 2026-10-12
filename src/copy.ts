@@ -405,7 +405,11 @@ function rewriteLocalReferences(
   sourceRoot: string,
   publicRoot: string,
 ): string {
-  let rewrittenContent = content.replace(quotedPathPattern, (whole, quote: string, value: string) => {
+  const moduleReferences = new Set([...content.matchAll(importPattern)].map(match =>
+    match.index! + match[0].length - match[2]!.length - 2));
+  let rewrittenContent = content.replace(quotedPathPattern, (whole, quote: string, value: string, offset: number) => {
+    // Bare dot markers are data unless used as an import/export specifier.
+    if ((value === "." || value === "..") && !moduleReferences.has(offset)) return whole;
     const rewritten = rewrittenReference(
       value, sourceFile, destinationFile, known, destinations, sourceRoot, publicRoot,
     );
