@@ -125,8 +125,13 @@ export async function embedPublicFiles(root: string, base: string, pages: string
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken
         && node.left.getText(source) === "import.meta.env.BASE_URL" && ts.isStringLiteralLike(node.right)) {
         const name = resolve(node.right.text, origin);
+        if (name && modules.has(name)) {
+          edit(node, `new URL(${JSON.stringify(name)}, globalThis.__vitalityEmbedded.root).href`);
+          return;
+        }
         if (name && Object.hasOwn(assets, name)) {
-          if (!/\.json$/i.test(name)) edit(node, `globalThis.__vitalityEmbedded.asset(${JSON.stringify(name)})`);
+          edit(node, /\.json$/i.test(name) ? `new URL(${JSON.stringify(name)}, globalThis.__vitalityEmbedded.root).href`
+            : `globalThis.__vitalityEmbedded.asset(${JSON.stringify(name)})`);
           return; // Existing base-prefixed JSON fetches must not get a second prefix.
         }
       }
@@ -175,7 +180,7 @@ export async function embedPublicFiles(root: string, base: string, pages: string
         if ((ts.isPropertyAssignment(parent) || ts.isMethodDeclaration(parent) || ts.isPropertyDeclaration(parent)) && parent.name === node) return;
         const name = resolve(node.text, origin);
         if (name && Object.hasOwn(assets, name)) edit(node, /\.json$/i.test(name)
-          ? `new URL(import.meta.env.BASE_URL + ${JSON.stringify(name)}, globalThis.location.href).href`
+          ? `new URL(${JSON.stringify(name)}, globalThis.__vitalityEmbedded.root).href`
           : `globalThis.__vitalityEmbedded.asset(${JSON.stringify(name)})`);
         return;
       }
@@ -190,12 +195,41 @@ export async function embedPublicFiles(root: string, base: string, pages: string
   await writeFile(path.join(root, "src/embedded-files.json"), JSON.stringify(assets, null, 2) + "\n");
   await writeFile(path.join(root, "src/embedded-scripts.json"), JSON.stringify(scriptURLs, null, 2) + "\n");
   await writeFile(path.join(root, "src/embedded-classic.json"), JSON.stringify(classicScripts, null, 2) + "\n");
-  const loaders = [...modules].filter(([name]) => dynamicModules.has(name) && !Object.hasOwn(scriptURLs, name)).map(([name, file]) => `${JSON.stringify(name)}: () => import(${JSON.stringify("./" + path.posix.relative("src", file))})`).join(",\n");
+  const moduleLoaders = (from = "src") => [...modules].filter(([name]) => dynamicModules.has(name) && !Object.hasOwn(scriptURLs, name)).map(([name, file]) => `${JSON.stringify(name)}: () => import(${JSON.stringify("./" + path.posix.relative(from, file))})`).join(",\n");
+  const loaders = moduleLoaders();
   await writeFile(path.join(root, "src/inline-runtime.ts"), runtimeSource(loaders));
   const main = path.join(root, "src/main.ts");
   await writeFile(main, 'import "./inline-runtime";\n' + await readFile(main, "utf8"));
-  // Emit secondary routable pages at their planned output paths as Vite pages.
-  const extraPages: string[] = [];
+  // Secondary documents are built independently, never as inputs to the main
+  // graph. Their adapters include only assets actually used by their scripts.
+  const extraPages: { name: string; entry: string; assets: string[]; scripts: string[] }[] = [];
+  const pageDependencies = (entries: string[]) => {
+    const seen = new Set<string>(), usedAssets = new Set<string>(), usedScripts = new Set<string>();
+    let dynamic = false;
+    const walk = (file: string) => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      const code = transformed.get(file);
+      if (!code) return;
+      const parsed = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true);
+      function visit(node: ts.Node): void {
+        if (ts.isStringLiteralLike(node)) {
+          if (Object.hasOwn(assets, node.text)) usedAssets.add(node.text);
+          if (Object.hasOwn(scriptURLs, node.text) || Object.hasOwn(classicScripts, node.text)) usedScripts.add(node.text);
+          const relative = path.posix.normalize(path.posix.join(path.posix.dirname(file), node.text));
+          for (const candidate of [relative, relative + ".ts", relative + ".mts", relative + ".js", relative + ".tsx"]) if (transformed.has(candidate)) walk(candidate);
+          for (const [name, dest] of Object.entries(assets)) if (dest === relative) usedAssets.add(name);
+        }
+        if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+          && node.expression.getText(parsed) === "globalThis.__vitalityEmbedded.import") dynamic = true;
+        ts.forEachChild(node, visit);
+      }
+      visit(parsed);
+    };
+    entries.forEach(walk);
+    return dynamic ? { assets: Object.keys(assets), scripts: [...new Set([...Object.keys(scriptURLs), ...Object.keys(classicScripts)])], dynamic }
+      : { assets: [...usedAssets], scripts: [...usedScripts], dynamic };
+  };
   for (const [name, item] of plan?.files ?? []) {
     if (name === "index.html" || !/\.html$/i.test(name) || !("file" in item)) continue;
     const shim = "page-entry/" + name.replace(/\.html$/i, "");
@@ -203,15 +237,20 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     let page: string;
     try { page = await readFile(path.join(root, "src/embedded", name), "utf8"); }
     catch { continue; }
-    page = page.replace(/(<script\b[^>]*?\bsrc\s*=\s*(["']))([^"']+)\2/gi, (whole, before: string, quote: string, url: string) => {
-      const target = path.posix.normalize(path.posix.join(path.posix.dirname(name), url));
-      const moduleItem = plan?.files.get(target);
+    let entryInserted = false;
+    page = page.replace(/<script\b([^>]*?)\bsrc\s*=\s*(["'])([^"']+)\2([^>]*)>\s*<\/script\s*>/gi,
+      (whole, before: string, _quote: string, url: string, after: string) => {
+      const target = resolve(url, name);
+      const moduleItem = target ? plan?.files.get(target) : undefined;
       if (moduleItem && "module" in moduleItem) {
         const source = web(path.relative(sourceRoot, moduleItem.module))
           .replace(/\.js$/i, ".ts").replace(/\.mjs$/i, ".mts").replace(/\.jsx$/i, ".tsx");
-        if (appFiles.includes(source) && !matched.includes(source)) {
-          matched.push(source);
-          return before.replace(/\sdefer\b/, ' type="module"') + `/src/${shim}.ts${quote}`;
+        if (appFiles.includes(source)) {
+          if (!matched.includes(source)) matched.push(source);
+          if (entryInserted) return "";
+          entryInserted = true;
+          const attributes = (before + after).replace(/\sdefer\b/i, "").replace(/\s+type\s*=\s*(["'])[^"']*\1/i, "").trim();
+          return `<script type="module"${attributes ? " " + attributes : ""} src="/src/${shim}.ts"></script>`;
         }
       }
       return whole;
@@ -226,13 +265,15 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     });
     page = embeddedCSP(page);
     const shimDir = path.posix.dirname(shim);
+    const dependencies = pageDependencies(matched.map(source => "src/app/" + source));
     await mkdir(path.join(root, "src", shimDir), { recursive: true });
     await mkdir(path.dirname(path.join(root, name)), { recursive: true });
     await writeFile(path.join(root, "src", shim + ".ts"),
-      [`import "${path.posix.relative(shimDir, "inline-runtime")}";`,
+      [`import "./${path.posix.basename(shim)}-runtime";`,
       ...matched.map(source => `import "${path.posix.relative(shimDir, "app/" + source)}";`)].join("\n") + "\n");
+    await writeFile(path.join(root, "src", shim + "-runtime.ts"), runtimeSource(dependencies.dynamic ? moduleLoaders("src/" + shimDir) : "", name));
     await writeFile(path.join(root, name), page);
-    extraPages.push(name);
+    extraPages.push({ name, entry: "src/" + shim + ".ts", assets: dependencies.assets, scripts: dependencies.scripts });
   }
   const plugin = (await readFile(new URL("./embedded-assets-plugin.js", import.meta.url), "utf8")).replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, "");
   await writeFile(path.join(root, "inline-assets.ts"), plugin);
@@ -242,12 +283,12 @@ import { embeddedAssets } from "./inline-assets.ts";
 const root = fileURLToPath(new URL(".", import.meta.url));
 export default defineConfig({
   root, base: ${JSON.stringify(base)}, publicDir: false,
-  plugins: [embeddedAssets(root, ${1 + extraPages.length})],
+  plugins: [embeddedAssets(root, ${JSON.stringify(extraPages)})],
   build: {
     outDir: "dist", emptyOutDir: true, target: "esnext", cssCodeSplit: false,
     assetsInlineLimit: Number.POSITIVE_INFINITY, modulePreload: false,
-    rolldownOptions: { input: ["index.html", ${extraPages.map(page => JSON.stringify(page)).join(", ")}],
-      output: { codeSplitting: ${extraPages.length ? "true" : "false"}, entryFileNames: "assets/[name].js",
+    rolldownOptions: { input: "index.html",
+      output: { codeSplitting: false, entryFileNames: "assets/index.js",
       assetFileNames: asset => asset.names.some(name => name.endsWith(".css")) ? "assets/index.css" : "assets/[name][extname]" } },
   },
 });
@@ -268,6 +309,8 @@ worker is required. Unknown URLs retain their original behavior.
 
 Production output is \`index.html\`, \`assets/index.js\`, optional
 \`assets/index.css\`, and content-hashed WASM/engine files in \`assets/\`.
+Source-composed helper pages retain their routes as self-contained HTML, with
+their own CSP and no extra main-bundle chunks.
 The build fails rather than silently emitting unrelated files.
 Source notices and source maps are kept in the wrapper, not deployed as assets.
 The base \`${base}\` applies to any host serving that path; no domain is required.
@@ -280,9 +323,10 @@ async function replaceAsync(text: string, regex: RegExp, replace: (...args: any[
   return text;
 }
 
-function runtimeSource(loaders: string): string {
+function runtimeSource(loaders: string, page = "index.html"): string {
+  const relativeRoot = (path.posix.relative(path.posix.dirname(page), ".") || ".") + "/";
   return `import assets, { scripts } from "virtual:vitality-assets";
-const root = new URL(import.meta.env.BASE_URL, location.href);
+const root = new URL(import.meta.env.BASE_URL === "./" || import.meta.env.BASE_URL === "" ? ${JSON.stringify(relativeRoot)} : import.meta.env.BASE_URL, location.href);
 const modules: Record<string, () => Promise<unknown>> = {${loaders}};
 function installEmbedded(assets, scripts, rootHref, modules = {}) {
 const root = new URL(rootHref);

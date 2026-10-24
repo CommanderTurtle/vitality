@@ -4,11 +4,19 @@ import { readFileSync, existsSync } from "node:fs";
 import { build, type Plugin } from "vite";
 
 // Copied into opt-in wrappers. This runs during the user's Vite command, never give.
-export function embeddedAssets(root: string, inputs = 1): Plugin {
-  const files: Record<string, string> = JSON.parse(readFileSync(path.join(root, "src/embedded-files.json"), "utf8"));
-  const scripts: Record<string, string> = JSON.parse(readFileSync(path.join(root, "src/embedded-scripts.json"), "utf8"));
+export interface EmbeddedPage {
+  name: string;
+  entry: string;
+  assets: string[];
+  scripts: string[];
+}
+export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selected?: Pick<EmbeddedPage, "assets" | "scripts">): Plugin {
+  const select = (values: Record<string, string>, names?: string[]) => names ? Object.fromEntries(names.filter(name => Object.hasOwn(values, name)).map(name => [name, values[name]!])) : values;
+  const allFiles: Record<string, string> = JSON.parse(readFileSync(path.join(root, "src/embedded-files.json"), "utf8"));
+  const files = select(allFiles, selected?.assets);
+  const scripts = select(JSON.parse(readFileSync(path.join(root, "src/embedded-scripts.json"), "utf8")), selected?.scripts);
   const classicPath = path.join(root, "src/embedded-classic.json");
-  const classic: Record<string, string> = existsSync(classicPath) ? JSON.parse(readFileSync(classicPath, "utf8")) : {};
+  const classic = select(existsSync(classicPath) ? JSON.parse(readFileSync(classicPath, "utf8")) : {}, selected?.scripts);
   const types: Record<string, string> = {
     ".json": "application/json", ".webmanifest": "application/manifest+json", ".css": "text/css",
     ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -36,12 +44,12 @@ export function embeddedAssets(root: string, inputs = 1): Plugin {
     const clean = value.split(/[?#]/)[0] ?? "";
     const rootPath = clean.startsWith(base) ? clean.slice(base.length) : clean.replace(/^\//, "");
     const relative = path.posix.normalize(path.posix.join(path.posix.dirname(from), clean));
-    return [clean.startsWith("/") ? rootPath : relative, rootPath].find(name => Object.hasOwn(files, name));
+    return [clean.startsWith("/") ? rootPath : relative, rootPath].find(name => Object.hasOwn(allFiles, name));
   }
   function encode(name: string): string {
     const old = cache.get(name);
     if (old) return old;
-    const source = files[name];
+    const source = allFiles[name];
     if (!source) throw new Error("Missing embedded asset: " + name);
     if (active.has(name)) throw new Error("Cyclic embedded asset reference: " + name);
     const file = path.resolve(root, source);
@@ -134,13 +142,45 @@ export function embeddedAssets(root: string, inputs = 1): Plugin {
     transformIndexHtml: { order: "pre", handler(html) {
       return html.replace(/%VITALITY_ASSET:([^%]+)%/g, (_all, name: string) => encode(Buffer.from(name, "base64url").toString("utf8")));
     } },
-    generateBundle: { order: "post", handler(_options, bundle) {
+    generateBundle: { order: "post", async handler(_options, bundle) {
       const unexpected = Object.keys(bundle).filter(name => {
         if (name.endsWith(".html") || emitted.has(name)) return false;
-        if (inputs > 1) return !/^assets\/.+\.(?:c?js|css)$/i.test(name);
         return name !== "assets/index.js" && name !== "assets/index.css";
       });
       if (unexpected.length) this.error("No-public build emitted separate files: " + unexpected.join(", ") + ". Use an inline worker/asset import or disable --no-public.");
+      // A helper document needs its own realm/CSP, not a second entry in the
+      // main graph: multiple entries re-enable splitting of every lazy import.
+      for (const page of pages) {
+        const result = await build({ root, base, configFile: false, publicDir: false, logLevel: "error",
+          plugins: [embeddedAssets(root, [], page)],
+          build: { write: false, target: "esnext", assetsInlineLimit: Infinity, modulePreload: false, cssCodeSplit: false,
+            lib: { entry: path.resolve(root, page.entry), formats: ["es"] },
+            rolldownOptions: { output: { codeSplitting: false, entryFileNames: "assets/index.js",
+              assetFileNames: asset => asset.names.some(name => name.endsWith(".css")) ? "assets/index.css" : "assets/[name][extname]" } } } });
+        const output = (Array.isArray(result) ? result : [result]).flatMap(item => "output" in item ? item.output : []);
+        const chunks = output.filter(item => item.type === "chunk");
+        if (chunks.length !== 1) this.error("Secondary page must have one independent script: " + page.name);
+        // Escape HTML's raw-text end marker without changing JS string values.
+        const code = chunks[0]!.code.replace(/<\/script/gi, "<\\/script");
+        const hash = "'sha256-" + createHash("sha256").update(code).digest("base64") + "'";
+        let html = readFileSync(path.resolve(root, page.name), "utf8")
+          .replace(/%VITALITY_ASSET:([^%]+)%/g, (_all, name: string) => encode(Buffer.from(name, "base64url").toString("utf8")))
+          .replace(/<script\b[^>]*\bsrc=["']\/src\/page-entry\/[^"']+["'][^>]*>\s*<\/script\s*>/i,
+            () => '<script type="module">' + code + '</script>')
+          .replace(/(<meta\b[^>]*http-equiv=["']Content-Security-Policy["'][^>]*content=)(["'])(.*?)\2/gi,
+            (_all, prefix: string, quote: string, policy: string) => {
+              if (/\bscript-src\s/.test(policy)) policy = policy.replace(/\bscript-src\s+([^;]*)/, (_all, values: string) => "script-src " + values.replace(/'none'\s*/g, "") + " " + hash);
+              else policy += "; script-src " + hash;
+              return prefix + quote + policy + quote;
+            });
+        for (const item of output) if (item.type === "asset") {
+          if (item.fileName === "assets/index.css") {
+            const css = Buffer.from(item.source).toString("base64");
+            html = html.replace(/<\/head\s*>/i, () => '<link rel="stylesheet" href="data:text/css;base64,' + css + '"></head>');
+          } else if (!bundle[item.fileName]) this.emitFile({ type: "asset", fileName: item.fileName, source: item.source });
+        }
+        this.emitFile({ type: "asset", fileName: page.name, source: html });
+      }
     } },
   };
 }

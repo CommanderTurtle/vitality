@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -96,6 +97,22 @@ test("unsupported source actions fail closed instead of executing", async contex
 
 test("no-public preserves secondary page routes and embeds their CSS under their own CSP", async context => {
   const source = await fixture(context);
+  await writeFile(path.join(source, 'source/native/assets/lazy.css'), '.dom-widget textarea { color: red; background: url(./pixel.svg) }');
+  await writeFile(path.join(source, 'source/native/assets/pixel.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  await writeFile(path.join(source, 'source/native/assets/native.js'), `
+    if (globalThis.title !== 'bootstrap') throw Error('bootstrap ran too late');
+    const __vite__mapDeps = (i, m = __vite__mapDeps, d = (m.f || (m.f = ['./unused.js', './lazy.css']))) => i.map(i => d[i]);
+    const styles = __vite__mapDeps([0, 1]);
+    if (styles.length !== 1 || !styles[0].startsWith('data:text/css;') || !styles[0].endsWith('.css')) throw Error('lazy CSS lost');
+    const css = atob(styles[0].split(',')[1].split('#')[0]);
+    if (!css.includes('.dom-widget textarea') || !css.includes('data:image/svg+xml;')) throw Error('widget CSS assets lost');
+    const response = await fetch(new URL('../data/config.json', import.meta.url));
+    if (!response.url.endsWith('/site/data/config.json')) throw Error('JSON URL changed');
+    const config = await response.json();
+    await import(config.extension);
+    if (!globalThis.extensionLoaded) throw Error('lazy extension lost');
+    globalThis.nativeReady = true;
+  `);
   await writeFile(path.join(source, 'src/importer.html'), '<html><head><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'self\'; style-src \'self\'; connect-src https:"><link rel="stylesheet" href="./page.css"></head><body><script defer src="./importer.js"></script></body></html>');
   await writeFile(path.join(source, 'src/page.css'), 'body {color: green}');
   await writeFile(path.join(source, 'src/importer.ts'), 'window.parent.postMessage({ready:true},location.origin);');
@@ -113,6 +130,41 @@ test("no-public preserves secondary page routes and embeds their CSS under their
   assert.match(html, /connect-src https: data:/);
   assert.doesNotMatch(html, /connect-src 'self'/);
   assert.match(await readFile(path.join(wrapper, 'vite.config.ts'), 'utf8'), /"tools\/importer\.html"/);
+  assert.match(await readFile(path.join(wrapper, 'vite.config.ts'), 'utf8'), /codeSplitting: false/);
+  // Reuse the repository's existing toolchain: this regression needs no install.
+  const dependencies = path.join(wrapper, 'node_modules');
+  await symlink(path.join(repository, 'node_modules'), dependencies, process.platform === 'win32' ? 'junction' : 'dir');
+  try {
+    const built = run(['run', '--bun', 'build'], wrapper);
+    assert.doesNotMatch(built.stderr, /remain unchanged|unresolved/i);
+    assert.deepEqual(await readdir(path.join(wrapper, 'dist/assets')), ['index.js']);
+    const page = await readFile(path.join(wrapper, 'dist/tools/importer.html'), 'utf8');
+    assert.match(page, /href="data:text\/css;base64,/);
+    assert.match(page, /<script type="module">[\s\S]*postMessage/);
+    assert.match(page, /script-src 'self'\s+'sha256-/);
+    assert.match(page, /connect-src https: data:/);
+    assert.doesNotMatch(page, /src="[^\"]*\.js|%VITALITY_ASSET:/);
+    const code = page.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
+    assert.ok(page.includes("'sha256-" + createHash('sha256').update(code).digest('base64') + "'"));
+    const result = run(['-e', `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/site/');await import('./dist/assets/index.js');if(!globalThis.nativeReady)throw Error('not initialized');console.log('ordered, styled, extended');`], wrapper);
+    assert.match(result.stdout, /ordered, styled, extended/);
+  } finally { await unlink(dependencies); }
+});
+
+test("ordinary source wrappers mark compiled helper scripts as modules with either inline setting", async context => {
+  const source = await fixture(context);
+  await writeFile(path.join(source, 'src/importer.html'), '<script defer src="./importer.js"></script>');
+  await writeFile(path.join(source, 'src/importer.ts'), 'window.parent.postMessage({ready:true},location.origin);');
+  const script = path.join(source, 'scripts/build.ts');
+  await writeFile(script, (await readFile(script, 'utf8'))
+    .replace("['src/boot.ts', 'data/boot.js', 'iife']", "['src/importer.ts', 'tools/importer.js', 'iife'], ['src/boot.ts', 'data/boot.js', 'iife']")
+    .replace("await Bun.write(join(stage, 'index.html'), html)", "await Bun.write(join(stage, 'index.html'), html)\nawait cp(join(root, 'src/importer.html'), join(stage, 'tools/importer.html'))"));
+  for (const inline of ['y', 'n']) {
+    run(['dist/cli.js', 'give', '-d', source, '-o', 'wrap-' + inline, '-b', '/site/', '--inline', inline, '--no-public', 'n']);
+    const wrapper = path.join(source, 'wrap-' + inline);
+    assert.match(await readFile(path.join(wrapper, 'public/tools/importer.html'), 'utf8'), /<script type="module"\s+src="\.\/importer\.js">/);
+    assert.match(await readFile(path.join(wrapper, 'src/main.ts'), 'utf8'), /boot\.ts[\s\S]*assets\/native\.js/);
+  }
 });
 
 test("no-public embeds URL assets and keeps lazy extension/bootstrap order", async context => {

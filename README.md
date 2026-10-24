@@ -178,7 +178,9 @@ Classic HTML scripts keep classic scope; their content is inlined, with CSP
 hashes when a policy exists. Sources, including notices, remain in the wrapper;
 notices and source maps are not deployed as loose assets. The output is
 `index.html`, one entry JS asset, optionally one CSS asset, and hashed engine
-assets. Native Vite wrappers retain hashed entry filenames. The build
+assets. Source-composed helper documents retain their routes as self-contained
+HTML with their own CSP; they do not enable splitting of the main bundle.
+Native Vite wrappers retain hashed entry filenames. The build
 fails if an additional file would be emitted instead of silently copying it.
 
 Inlining trades away separate-file caching and lazy network downloads; a large

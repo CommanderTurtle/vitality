@@ -112,7 +112,18 @@ export async function copyComposition(root: string, wrapper: string, plan: Compo
   await write("src/main.ts", "// Source bootstraps run before the native module graph.\n" + startup.join("\n") + "\nexport {};\n");
   for (const [name, item] of plan.files) {
     if (name === "index.html" || "module" in item) continue;
-    const content = await readItem(name);
+    let content = await readItem(name);
+    if (!noPublic && /\.html?$/i.test(name)) {
+      // Bun's classic/IIFE entry is now an ES-module Vite entry. Public HTML
+      // bypasses Vite's HTML transform, so preserve that execution contract here.
+      content = String(content).replace(/<script\b([^>]*?)\bsrc\s*=\s*(["'])([^"']+)\2([^>]*)>/gi,
+        (whole, before: string, quote: string, url: string, after: string) => {
+          const target = url.startsWith("/") ? url.slice(1) : path.posix.normalize(path.posix.join(path.posix.dirname(name), url));
+          if (!modules.has(target)) return whole;
+          const attributes = (value: string) => value.replace(/\s*\btype\s*=\s*(["'])[^"']*\1/i, "").replace(/\sdefer\b/i, "");
+          return `<script type="module"${attributes(before)}src=${quote}${url}${quote}${attributes(after)}>`;
+        });
+    }
     await write("public/" + name, !noPublic && /\.(?:html?|[cm]?js|json|css)$/i.test(name) ? rebase(String(content)) : content);
   }
   const input: Record<string, string> = { index: "index.html" };
@@ -141,7 +152,7 @@ export default defineConfig({
     });
   } }],
   build: {
-    outDir: "dist", emptyOutDir: true, modulePreload: false,
+    outDir: "dist", emptyOutDir: true, target: "esnext", modulePreload: false,
     ${inline ? "assetsInlineLimit: Number.POSITIVE_INFINITY," : "// assetsInlineLimit: Vite default,"}
     rolldownOptions: {
       input: Object.fromEntries(Object.entries(input).map(([name, file]) => [name, path.resolve(root, file)])),
