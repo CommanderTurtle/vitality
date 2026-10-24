@@ -180,7 +180,7 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     }
     visit(source);
     for (const item of edits.sort((a, b) => b.start - a.start || b.end - a.end)) code = code.slice(0, item.start) + item.text + code.slice(item.end);
-    code = code.replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, "");
+    code = code.replace(/^\/\/[#@]\s*sourceMappingURL=\S+\s*$/gm, "");
     transformed.set(file, code);
   }
   for (const [file, code] of transformed) await writeFile(path.join(root, file), code);
