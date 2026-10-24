@@ -94,6 +94,27 @@ test("unsupported source actions fail closed instead of executing", async contex
   await assert.rejects(stat(path.join(source, 'dist')));
 });
 
+test("no-public preserves secondary page routes and embeds their CSS under their own CSP", async context => {
+  const source = await fixture(context);
+  await writeFile(path.join(source, 'src/importer.html'), '<html><head><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'self\'; style-src \'self\'; connect-src https:"><link rel="stylesheet" href="./page.css"></head><body><script defer src="./importer.js"></script></body></html>');
+  await writeFile(path.join(source, 'src/page.css'), 'body {color: green}');
+  await writeFile(path.join(source, 'src/importer.ts'), 'window.parent.postMessage({ready:true},location.origin);');
+  const script = path.join(source, 'scripts/build.ts');
+  await writeFile(script, (await readFile(script, 'utf8'))
+    .replace("['src/boot.ts', 'data/boot.js', 'iife']", "['src/importer.ts', 'tools/importer.js', 'iife'], ['src/boot.ts', 'data/boot.js', 'iife']")
+    .replace("await Bun.write(join(stage, 'index.html'), html)", "await Bun.write(join(stage, 'index.html'), html)\nawait cp(join(root, 'src/importer.html'), join(stage, 'tools/importer.html'))\nawait cp(join(root, 'src/page.css'), join(stage, 'tools/page.css'))"));
+  run(['dist/cli.js', 'give', '-d', source, '-b', '/site/', '--inline', 'y', '--no-public']);
+  const wrapper = path.join(source, 'mywrap');
+  const html = await readFile(path.join(wrapper, 'tools/importer.html'), 'utf8');
+  assert.match(html, /type="module" src="\/src\/page-entry\/tools\/importer\.ts"/);
+  assert.match(html, /href="%VITALITY_ASSET:/);
+  assert.doesNotMatch(html, /href="\.\/page\.css"/);
+  assert.match(html, /style-src 'self' data:/);
+  assert.match(html, /connect-src https: data:/);
+  assert.doesNotMatch(html, /connect-src 'self'/);
+  assert.match(await readFile(path.join(wrapper, 'vite.config.ts'), 'utf8'), /"tools\/importer\.html"/);
+});
+
 test("no-public embeds URL assets and keeps lazy extension/bootstrap order", async context => {
   const source = await fixture(context);
   await writeFile(path.join(source, 'source/native/index.html'), '<html><head><meta http-equiv="Content-Security-Policy" content="script-src \'self\'; style-src \'self\'"><link rel="stylesheet" href="assets/style.css"></head><body><script src="assets/classic.js"></script><script type="module" src="./assets/native.js"></script></body></html>');

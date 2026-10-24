@@ -91,16 +91,16 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     const name = resolve(value);
     return name && Object.hasOwn(assets, name) ? `${attribute}=${quote}%VITALITY_ASSET:${Buffer.from(name).toString("base64url")}%${quote}` : whole;
   });
-  html = html.replace(/(<meta\b[^>]*http-equiv=["']Content-Security-Policy["'][^>]*content=)(["'])(.*?)\2/gi,
+  const embeddedCSP = (html: string, hashes: string[] = []) => html.replace(/(<meta\b[^>]*http-equiv=["']Content-Security-Policy["'][^>]*content=)(["'])(.*?)\2/gi,
     (_whole, prefix: string, quote: string, policy: string) => {
       const directives = new Map(policy.split(";").map(part => part.trim().split(/\s+/)).filter(([name]) => name).map(([name, ...values]) => [name!, values]));
-      for (const [name, values] of [["script-src", scriptHashes], ["style-src", ["data:"]], ["img-src", ["data:"]], ["font-src", ["data:"]], ["connect-src", ["data:"]]] as const) {
+      for (const [name, values] of [["script-src", hashes], ["style-src", ["data:"]], ["img-src", ["data:"]], ["font-src", ["data:"]], ["connect-src", ["data:"]]] as const) {
         const existing = directives.get(name) ?? directives.get("default-src") ?? ["'self'"];
         directives.set(name, [...new Set([...existing.filter(v => v !== "'none'"), ...values])]);
       }
       return prefix + quote + [...directives].map(([name, values]) => [name, ...values].join(" ")).join("; ") + quote;
     });
-  await writeFile(path.join(root, "index.html"), html);
+  await writeFile(path.join(root, "index.html"), embeddedCSP(html, scriptHashes));
 
   // Convert only known local URLs. API routes and unrecognized external URLs stay intact.
   const codeFiles = (await inventory(path.join(root, "src"))).map(name => "src/" + name).filter(name => moduleFile.test(name) && !nonRuntime.test(name));
@@ -217,6 +217,14 @@ export async function embedPublicFiles(root: string, base: string, pages: string
       return whole;
     });
     if (!matched.length) continue;
+    // Secondary documents keep their own policy/realm (e.g. a CORS importer),
+    // but their stylesheet/image URLs need the same embedding as the main page.
+    page = page.replace(/\b(src|href|poster)\s*=\s*(["'])([^"']+)\2/gi, (whole, attribute: string, quote: string, value: string) => {
+      const target = resolve(value, name);
+      return target && Object.hasOwn(assets, target)
+        ? `${attribute}=${quote}%VITALITY_ASSET:${Buffer.from(target).toString("base64url")}%${quote}` : whole;
+    });
+    page = embeddedCSP(page);
     const shimDir = path.posix.dirname(shim);
     await mkdir(path.join(root, "src", shimDir), { recursive: true });
     await mkdir(path.dirname(path.join(root, name)), { recursive: true });
