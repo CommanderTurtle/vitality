@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import ts from "typescript-parser";
 import type { Composition } from "./composition.js";
 import { UsageError } from "./args.js";
@@ -29,7 +29,10 @@ export async function embedPublicFiles(root: string, base: string, pages: string
   const assets: Record<string, string> = {};
   const originalNames = new Map<string, string>();
   const files = new Map<string, string>();
+  const pageNames = new Set<string>();
+  for (const [name, item] of plan?.files ?? []) if (name !== "index.html" && /\.html$/i.test(name) && "file" in item) pageNames.add(name);
   for (const name of publicFiles) {
+    if (pageNames.has(name)) continue;
     const dest = "src/embedded/" + name;
     files.set(name, dest);
     if (nonRuntime.test(name)) continue;
@@ -191,6 +194,38 @@ export async function embedPublicFiles(root: string, base: string, pages: string
   await writeFile(path.join(root, "src/inline-runtime.ts"), runtimeSource(loaders));
   const main = path.join(root, "src/main.ts");
   await writeFile(main, 'import "./inline-runtime";\n' + await readFile(main, "utf8"));
+  // Emit secondary routable pages at their planned output paths as Vite pages.
+  const extraPages: string[] = [];
+  for (const [name, item] of plan?.files ?? []) {
+    if (name === "index.html" || !/\.html$/i.test(name) || !("file" in item)) continue;
+    const shim = "page-entry/" + name.replace(/\.html$/i, "");
+    const matched: string[] = [];
+    let page: string;
+    try { page = await readFile(path.join(root, "src/embedded", name), "utf8"); }
+    catch { continue; }
+    page = page.replace(/(<script\b[^>]*?\bsrc\s*=\s*(["']))([^"']+)\2/gi, (whole, before: string, quote: string, url: string) => {
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(name), url));
+      const moduleItem = plan?.files.get(target);
+      if (moduleItem && "module" in moduleItem) {
+        const source = web(path.relative(sourceRoot, moduleItem.module))
+          .replace(/\.js$/i, ".ts").replace(/\.mjs$/i, ".mts").replace(/\.jsx$/i, ".tsx");
+        if (appFiles.includes(source) && !matched.includes(source)) {
+          matched.push(source);
+          return before.replace(/\sdefer\b/, ' type="module"') + `/src/${shim}.ts${quote}`;
+        }
+      }
+      return whole;
+    });
+    if (!matched.length) continue;
+    const shimDir = path.posix.dirname(shim);
+    await mkdir(path.join(root, "src", shimDir), { recursive: true });
+    await mkdir(path.dirname(path.join(root, name)), { recursive: true });
+    await writeFile(path.join(root, "src", shim + ".ts"),
+      [`import "${path.posix.relative(shimDir, "inline-runtime")}";`,
+      ...matched.map(source => `import "${path.posix.relative(shimDir, "app/" + source)}";`)].join("\n") + "\n");
+    await writeFile(path.join(root, name), page);
+    extraPages.push(name);
+  }
   const plugin = (await readFile(new URL("./embedded-assets-plugin.js", import.meta.url), "utf8")).replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, "");
   await writeFile(path.join(root, "inline-assets.ts"), plugin);
   await writeFile(path.join(root, "vite.config.ts"), `import { defineConfig } from "vite";
@@ -199,11 +234,12 @@ import { embeddedAssets } from "./inline-assets.ts";
 const root = fileURLToPath(new URL(".", import.meta.url));
 export default defineConfig({
   root, base: ${JSON.stringify(base)}, publicDir: false,
-  plugins: [embeddedAssets(root)],
+  plugins: [embeddedAssets(root, ${1 + extraPages.length})],
   build: {
     outDir: "dist", emptyOutDir: true, target: "esnext", cssCodeSplit: false,
     assetsInlineLimit: Number.POSITIVE_INFINITY, modulePreload: false,
-    rolldownOptions: { output: { codeSplitting: false, entryFileNames: "assets/index.js",
+    rolldownOptions: { input: ["index.html", ${extraPages.map(page => JSON.stringify(page)).join(", ")}],
+      output: { codeSplitting: ${extraPages.length ? "true" : "false"}, entryFileNames: "assets/[name].js",
       assetFileNames: asset => asset.names.some(name => name.endsWith(".css")) ? "assets/index.css" : "assets/[name][extname]" } },
   },
 });

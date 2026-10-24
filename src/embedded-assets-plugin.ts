@@ -4,7 +4,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { build, type Plugin } from "vite";
 
 // Copied into opt-in wrappers. This runs during the user's Vite command, never give.
-export function embeddedAssets(root: string): Plugin {
+export function embeddedAssets(root: string, inputs = 1): Plugin {
   const files: Record<string, string> = JSON.parse(readFileSync(path.join(root, "src/embedded-files.json"), "utf8"));
   const scripts: Record<string, string> = JSON.parse(readFileSync(path.join(root, "src/embedded-scripts.json"), "utf8"));
   const classicPath = path.join(root, "src/embedded-classic.json");
@@ -135,7 +135,11 @@ export function embeddedAssets(root: string): Plugin {
       return html.replace(/%VITALITY_ASSET:([^%]+)%/g, (_all, name: string) => encode(Buffer.from(name, "base64url").toString("utf8")));
     } },
     generateBundle: { order: "post", handler(_options, bundle) {
-      const unexpected = Object.keys(bundle).filter(name => !name.endsWith(".html") && name !== "assets/index.js" && name !== "assets/index.css" && !emitted.has(name));
+      const unexpected = Object.keys(bundle).filter(name => {
+        if (name.endsWith(".html") || emitted.has(name)) return false;
+        if (inputs > 1) return !/^assets\/.+\.(?:c?js|css)$/i.test(name);
+        return name !== "assets/index.js" && name !== "assets/index.css";
+      });
       if (unexpected.length) this.error("No-public build emitted separate files: " + unexpected.join(", ") + ". Use an inline worker/asset import or disable --no-public.");
     } },
   };
