@@ -157,7 +157,7 @@ generated HTML. Static-host control files at the selected site root (`404.html`,
 vitality give -d "PATH" -b "/comfy/" --inline y --no-public
 ```
 
-For single-page projects, `--no-public` (also `--nopublic`) embeds URL-loaded
+For static projects, `--no-public` (also `--nopublic`) embeds URL-loaded
 runtime assets as well. It implies Infinity and cannot be combined with
 `--no-inline`. Existing behavior remains the default when it is not selected.
 
@@ -178,14 +178,14 @@ Classic HTML scripts keep classic scope; their content is inlined, with CSP
 hashes when a policy exists. Sources, including notices, remain in the wrapper;
 notices and source maps are not deployed as loose assets. The output is
 `index.html`, one entry JS asset, optionally one CSS asset, and hashed engine
-assets. Source-composed helper documents retain their routes as self-contained
+assets. Referenced helper documents (including in built static sites) retain their routes as self-contained
 HTML with their own CSP; they do not enable splitting of the main bundle.
 Native Vite wrappers retain hashed entry filenames. The build
 fails if an additional file would be emitted instead of silently copying it.
 
 Inlining trades away separate-file caching and lazy network downloads; a large
-native frontend will produce a large main bundle. This opt-in currently requires
-a single-page entry. Unknown URLs retain their original behavior: no-public is
+native frontend will produce a large main bundle. Each referenced helper page
+keeps its own document and policy. Unknown URLs retain their original behavior: no-public is
 not a replacement for a server API, nor a promise to infer remote resources or
 files missing from the detected source graph. Host-specific control files
 such as `_headers` and `CNAME` are not emitted in this compact mode.

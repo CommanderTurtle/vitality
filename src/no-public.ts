@@ -22,15 +22,15 @@ async function inventory(root: string): Promise<string[]> {
 }
 
 export async function embedPublicFiles(root: string, base: string, pages: string[], sourceRoot: string, plan?: Composition): Promise<void> {
-  if (pages.length) throw new UsageError("--no-public currently requires a single-page entry; use normal mode for routable HTML pages");
   const publicFiles = await inventory(path.join(root, "public"));
   const modules = new Map<string, string>();
   const dynamicModules = new Set<string>();
   const assets: Record<string, string> = {};
   const originalNames = new Map<string, string>();
   const files = new Map<string, string>();
-  const pageNames = new Set<string>();
+  const pageNames = new Set<string>(pages);
   for (const [name, item] of plan?.files ?? []) if (name !== "index.html" && /\.html$/i.test(name) && "file" in item) pageNames.add(name);
+  for (const name of pageNames) files.set(name, name);
   for (const name of publicFiles) {
     if (pageNames.has(name)) continue;
     const dest = "src/embedded/" + name;
@@ -51,6 +51,11 @@ export async function embedPublicFiles(root: string, base: string, pages: string
       modules.set(file, dest);
       const jsName = file.replace(/\.mts$/, ".mjs").replace(/\.tsx$/, ".jsx").replace(/\.ts$/, ".js");
       if (!modules.has(jsName)) modules.set(jsName, dest);
+      // An already-built site can discover modules through JSON/API manifests,
+      // not just import statements (e.g. ComfyUI's /extensions response).
+      // Retain their original URL identities in the lazy runtime resolver too.
+      dynamicModules.add(jsName);
+      originalNames.set(dest, jsName);
     } else {
       assets[file] = dest;
       assets[dest] = dest;
@@ -178,6 +183,13 @@ export async function embedPublicFiles(root: string, base: string, pages: string
       if (ts.isStringLiteralLike(node)) {
         const parent = node.parent;
         if ((ts.isPropertyAssignment(parent) || ts.isMethodDeclaration(parent) || ts.isPropertyDeclaration(parent)) && parent.name === node) return;
+        // The copier rebases helper URLs from src/app back to wrapper-root
+        // HTML. Resolve those against the copied file, not its runtime URL.
+        const page = resolve(node.text, file) ?? resolve(node.text, origin);
+        if (page && pageNames.has(page)) {
+          edit(node, `new URL(${JSON.stringify(page)}, globalThis.__vitalityEmbedded.root).href`);
+          return;
+        }
         const name = resolve(node.text, origin);
         if (name && Object.hasOwn(assets, name)) edit(node, /\.json$/i.test(name)
           ? `new URL(${JSON.stringify(name)}, globalThis.__vitalityEmbedded.root).href`
@@ -230,32 +242,30 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     return dynamic ? { assets: Object.keys(assets), scripts: [...new Set([...Object.keys(scriptURLs), ...Object.keys(classicScripts)])], dynamic }
       : { assets: [...usedAssets], scripts: [...usedScripts], dynamic };
   };
-  for (const [name, item] of plan?.files ?? []) {
-    if (name === "index.html" || !/\.html$/i.test(name) || !("file" in item)) continue;
+  for (const name of pageNames) {
     const shim = "page-entry/" + name.replace(/\.html$/i, "");
     const matched: string[] = [];
     let page: string;
-    try { page = await readFile(path.join(root, "src/embedded", name), "utf8"); }
+    try { page = await readFile(path.join(root, pages.includes(name) ? name : "src/embedded/" + name), "utf8"); }
     catch { continue; }
     let entryInserted = false;
     page = page.replace(/<script\b([^>]*?)\bsrc\s*=\s*(["'])([^"']+)\2([^>]*)>\s*<\/script\s*>/gi,
       (whole, before: string, _quote: string, url: string, after: string) => {
       const target = resolve(url, name);
-      const moduleItem = target ? plan?.files.get(target) : undefined;
-      if (moduleItem && "module" in moduleItem) {
-        const source = web(path.relative(sourceRoot, moduleItem.module))
-          .replace(/\.js$/i, ".ts").replace(/\.mjs$/i, ".mts").replace(/\.jsx$/i, ".tsx");
-        if (appFiles.includes(source)) {
-          if (!matched.includes(source)) matched.push(source);
-          if (entryInserted) return "";
-          entryInserted = true;
-          const attributes = (before + after).replace(/\sdefer\b/i, "").replace(/\s+type\s*=\s*(["'])[^"']*\1/i, "").trim();
-          return `<script type="module"${attributes ? " " + attributes : ""} src="/src/${shim}.ts"></script>`;
-        }
+      const source = target ? modules.get(target) : undefined;
+      if (source) {
+        if (!matched.includes(source)) matched.push(source);
+        if (entryInserted) return "";
+        entryInserted = true;
+        const attributes = (before + after).replace(/\sdefer\b/i, "").replace(/\s+type\s*=\s*(["'])[^"']*\1/i, "").trim();
+        return `<script type="module"${attributes ? " " + attributes : ""} src="/src/${shim}.ts"></script>`;
       }
       return whole;
     });
-    if (!matched.length) continue;
+    if (!entryInserted) {
+      const entry = `<script type="module" src="/src/${shim}.ts"></script>`;
+      page = /<\/head\s*>/i.test(page) ? page.replace(/<\/head\s*>/i, entry + '</head>') : entry + page;
+    }
     // Secondary documents keep their own policy/realm (e.g. a CORS importer),
     // but their stylesheet/image URLs need the same embedding as the main page.
     page = page.replace(/\b(src|href|poster)\s*=\s*(["'])([^"']+)\2/gi, (whole, attribute: string, quote: string, value: string) => {
@@ -265,12 +275,12 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     });
     page = embeddedCSP(page);
     const shimDir = path.posix.dirname(shim);
-    const dependencies = pageDependencies(matched.map(source => "src/app/" + source));
+    const dependencies = pageDependencies(matched);
     await mkdir(path.join(root, "src", shimDir), { recursive: true });
     await mkdir(path.dirname(path.join(root, name)), { recursive: true });
     await writeFile(path.join(root, "src", shim + ".ts"),
       [`import "./${path.posix.basename(shim)}-runtime";`,
-      ...matched.map(source => `import "${path.posix.relative(shimDir, "app/" + source)}";`)].join("\n") + "\n");
+      ...matched.map(source => `import "${path.posix.relative(shimDir, source.replace(/^src\//, ''))}";`)].join("\n") + "\n");
     await writeFile(path.join(root, "src", shim + "-runtime.ts"), runtimeSource(dependencies.dynamic ? moduleLoaders("src/" + shimDir) : "", name));
     await writeFile(path.join(root, name), page);
     extraPages.push({ name, entry: "src/" + shim + ".ts", assets: dependencies.assets, scripts: dependencies.scripts });
@@ -309,7 +319,7 @@ worker is required. Unknown URLs retain their original behavior.
 
 Production output is \`index.html\`, \`assets/index.js\`, optional
 \`assets/index.css\`, and content-hashed WASM/engine files in \`assets/\`.
-Source-composed helper pages retain their routes as self-contained HTML, with
+Referenced helper pages retain their routes as self-contained HTML, with
 their own CSP and no extra main-bundle chunks.
 The build fails rather than silently emitting unrelated files.
 Source notices and source maps are kept in the wrapper, not deployed as assets.

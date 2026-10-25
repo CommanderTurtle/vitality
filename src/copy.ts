@@ -31,7 +31,9 @@ const moduleScriptPattern = /<script\b([^>]*)\bsrc\s*=\s*(["'])([^"']+)\2([^>]*)
 const styleLinkPattern = /<link\b([^>]*)\bhref\s*=\s*(["'])([^"']+)\2([^>]*)>/giu;
 const inlineModulePattern = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/giu;
 const importPattern = /\b(?:import\s*(?:[^"'`]*?\sfrom\s*)?|export\s+[^"'`]*?\sfrom\s*|import\s*\()\s*(["'])([^"']+)\1/gu;
-const quotedPathPattern = /(["'`])([^"'`\r\n]+)\1/gu;
+// Only the matching delimiter ends a value: CSP attributes and bundled
+// strings commonly contain the other quote characters.
+const quotedPathPattern = /(["'`])((?:\\.|(?!\1)[^\\\r\n])*)\1/gu;
 const unquotedCssUrlPattern = /(url\(\s*)(?!["']|data:|#)([^)\s]+)(\s*\))/giu;
 const importMetaUrlPattern = /new\s+URL\(\s*(["'])([^"']+)\1\s*,\s*import\.meta\.url\s*\)/gu;
 
@@ -148,7 +150,10 @@ function resolveReference(
       path.join(direct, "index.js"), path.join(direct, "index.jsx"), path.join(direct, "index.tsx"),
     ]
     : [direct];
-  return candidates.find((candidate) => known.has(candidate));
+  return candidates.find((candidate) => known.has(candidate))
+    // Built runtimes also resolve literal manifest/helper URLs against a
+    // computed deployment root rather than the current chunk's directory.
+    ?? [path.resolve(sourceRoot, pathname.replace(/^\//, ''))].find(candidate => known.has(candidate));
 }
 
 async function inventory(source: string, output: string, temporary: string): Promise<SourceInventory> {
