@@ -24,6 +24,19 @@ export function compactConfig(source: UserConfig, base: string): UserConfig {
   const originalBase = source.base ?? "/";
   const publicDir = source.publicDir === false ? false : path.resolve(root, source.publicDir ?? "public");
   const assets: Record<string, string> = {};
+  function assetPayload(): string {
+    const values = new Map<string, string>();
+    const declarations: string[] = [];
+    const fields = Object.entries(assets).map(([name, data]) => {
+      if (!values.has(data)) {
+        const symbol = "a" + values.size;
+        values.set(data, symbol);
+        declarations.push(`${symbol}=${JSON.stringify(data)}`);
+      }
+      return JSON.stringify(name) + ":" + values.get(data);
+    });
+    return declarations.length ? `(()=>{const ${declarations.join(",")};return {${fields.join(",")}}})()` : "{}";
+  }
   const emitted = new Map<string, Buffer>();
   function emitEngine(bytes: Buffer, name: string): string {
     const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
@@ -92,7 +105,6 @@ export function compactConfig(source: UserConfig, base: string): UserConfig {
   }
   const ensure = () => ready ??= collect();
   const runtimeId = "virtual:vitality-native-runtime";
-  const entryFiles = new Set<string>();
   const applyEdits = (code: string, edits: { start: number; end: number; text: string }[]) => {
     for (const edit of edits.sort((a, b) => b.start - a.start)) code = code.slice(0, edit.start) + edit.text + code.slice(edit.end);
     return code;
@@ -125,9 +137,8 @@ export function compactConfig(source: UserConfig, base: string): UserConfig {
           ts.forEachChild(node, visit);
         }
         visit(parsed);
-        const entry = entryFiles.has(path.resolve(id.split("?")[0]!));
-        if (!edits.length && !entry) return;
-        return { code: (entry && !worker ? `import ${JSON.stringify(runtimeId)};\n` : "") + imports.join("\n") + "\n" + applyEdits(code, edits), map: null };
+        if (!edits.length) return;
+        return { code: imports.join("\n") + "\n" + applyEdits(code, edits), map: null };
       },
       renderChunk: { order: "pre", handler(code, chunk) {
         const parsed = ts.createSourceFile(chunk.fileName, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
@@ -170,18 +181,18 @@ export function compactConfig(source: UserConfig, base: string): UserConfig {
     },
     transformIndexHtml: { order: "pre", async handler(html) {
       await ensure();
-      for (const match of html.matchAll(/<script\b([^>]*?)src=["']([^"']+)["']([^>]*)>/gi)) {
-        if (/\btype=["']module["']/.test(match[1]! + match[3]!)) entryFiles.add(path.resolve(root, match[2]!.replace(/^\//, "")));
-      }
-      return html.replace(/\b(src|href|poster)=(["'])([^"']+)\2/g, (whole, attr, quote, value: string) => {
+      const rewritten = html.replace(/\b(src|href|poster)=(["'])([^"']+)\2/g, (whole, attr, quote, value: string) => {
         const name = value.startsWith(originalBase) ? value.slice(originalBase.length) : value.replace(/^\.?\//, "");
         return Object.hasOwn(assets, name) && !/\.[cm]?js$/.test(name) ? `${attr}=${quote}${assets[name]}${quote}` : whole;
       });
+      // A real HTML module preserves initialization order without depending on
+      // entry transforms starting after this hook (which newer Vite can race).
+      return { html: rewritten, tags: [{ tag: "script", attrs: { type: "module", src: "/@vitality-runtime" }, injectTo: "head-prepend" }] };
     } },
     augmentChunkHash() {
-      const hash = createHash("sha256");
-      for (const [name, data] of Object.entries(assets).sort(([a], [b]) => a.localeCompare(b))) hash.update(name).update(data);
-      return hash.digest("hex");
+      // This payload is inserted after chunk hashing; hash its actual source,
+      // including serialization changes, so browsers cannot retain old code.
+      return createHash("sha256").update(assetPayload()).digest("hex");
     },
     generateBundle: { order: "post", handler(_output, bundle) {
       for (const [fileName, source] of emitted) this.emitFile({ type: "asset", fileName, source });
@@ -191,18 +202,7 @@ export function compactConfig(source: UserConfig, base: string): UserConfig {
       const entry = entries[0];
       const marker = /(["'`])__VITALITY_NATIVE_ASSETS__\1/;
       if (entries.length !== 1 || !entry || entry.type !== "chunk" || !marker.test(entry.code)) this.error("No-public requires one HTML module entry with an embedded runtime");
-      const values = new Map<string, string>();
-      const declarations: string[] = [];
-      const fields = Object.entries(assets).map(([name, data]) => {
-        if (!values.has(data)) {
-          const symbol = "a" + values.size;
-          values.set(data, symbol);
-          declarations.push(`${symbol}=${JSON.stringify(data)}`);
-        }
-        return JSON.stringify(name) + ":" + values.get(data);
-      });
-      const payload = declarations.length ? `(()=>{const ${declarations.join(",")};return {${fields.join(",")}})()` : "{}";
-      entry.code = entry.code.replace(marker, () => payload);
+      entry.code = entry.code.replace(marker, assetPayload);
       this.info(`Mapped ${Object.keys(assets).length} resources; ${emitted.size} hashed engine assets; no public directory copied.`);
     } },
   };

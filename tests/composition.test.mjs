@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -131,24 +131,22 @@ test("no-public preserves secondary page routes and embeds their CSS under their
   assert.doesNotMatch(html, /connect-src 'self'/);
   assert.match(await readFile(path.join(wrapper, 'vite.config.ts'), 'utf8'), /"tools\/importer\.html"/);
   assert.match(await readFile(path.join(wrapper, 'vite.config.ts'), 'utf8'), /codeSplitting: false/);
-  // Reuse the repository's existing toolchain: this regression needs no install.
-  const dependencies = path.join(wrapper, 'node_modules');
-  await symlink(path.join(repository, 'node_modules'), dependencies, process.platform === 'win32' ? 'junction' : 'dir');
-  try {
-    const built = run(['run', '--bun', 'build'], wrapper);
-    assert.doesNotMatch(built.stderr, /remain unchanged|unresolved/i);
-    assert.deepEqual(await readdir(path.join(wrapper, 'dist/assets')), ['index.js']);
-    const page = await readFile(path.join(wrapper, 'dist/tools/importer.html'), 'utf8');
-    assert.match(page, /href="data:text\/css;base64,/);
-    assert.match(page, /<script type="module">[\s\S]*postMessage/);
-    assert.match(page, /script-src 'self'\s+'sha256-/);
-    assert.match(page, /connect-src https: data:/);
-    assert.doesNotMatch(page, /src="[^\"]*\.js|%VITALITY_ASSET:/);
-    const code = page.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
-    assert.ok(page.includes("'sha256-" + createHash('sha256').update(code).digest('base64') + "'"));
-    const result = run(['-e', `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/site/');await import('./dist/assets/index.js');if(!globalThis.nativeReady)throw Error('not initialized');console.log('ordered, styled, extended');`], wrapper);
-    assert.match(result.stdout, /ordered, styled, extended/);
-  } finally { await unlink(dependencies); }
+  // Exercise the generated package, avoiding Bun's Windows mkdir-through-junction issue.
+  const installed = spawnSync('bun', ['install', '--ignore-scripts'], { cwd: wrapper, encoding: 'utf8', windowsHide: true });
+  assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+  const built = run(['run', '--bun', 'build'], wrapper);
+  assert.doesNotMatch(built.stderr, /remain unchanged|unresolved/i);
+  assert.deepEqual(await readdir(path.join(wrapper, 'dist/assets')), ['index.js']);
+  const page = await readFile(path.join(wrapper, 'dist/tools/importer.html'), 'utf8');
+  assert.match(page, /href="data:text\/css;base64,/);
+  assert.match(page, /<script type="module">[\s\S]*postMessage/);
+  assert.match(page, /script-src 'self'\s+'sha256-/);
+  assert.match(page, /connect-src https: data:/);
+  assert.doesNotMatch(page, /src="[^\"]*\.js|%VITALITY_ASSET:/);
+  const code = page.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
+  assert.ok(page.includes("'sha256-" + createHash('sha256').update(code).digest('base64') + "'"));
+  const result = run(['-e', `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/site/');await import('./dist/assets/index.js');if(!globalThis.nativeReady)throw Error('not initialized');console.log('ordered, styled, extended');`], wrapper);
+  assert.match(result.stdout, /ordered, styled, extended/);
 });
 
 test("ordinary source wrappers mark compiled helper scripts as modules with either inline setting", async context => {

@@ -57,6 +57,7 @@ test("native wrapper emits hashed files and handles forced-inline worker WASM", 
     assert.ok(!transformed.code.includes("data:application/wasm"));
     const entry = { type: "chunk", isEntry: true, code: 'const assets="__VITALITY_NATIVE_ASSETS__";' };
     call(plugin.generateBundle, ctx, {}, { "assets/index-abcd.js": entry });
+    assert.doesNotThrow(() => new Function(entry.code));
     assert.equal(ctx.emitted.length, 2);
     assert.deepEqual(ctx.emitted.find(file => file.fileName.startsWith("assets/model-")).source, wasm);
     assert.deepEqual(ctx.emitted.find(file => file.fileName.startsWith("assets/module-")).source, large);

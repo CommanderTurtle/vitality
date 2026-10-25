@@ -1,7 +1,8 @@
 import type { Composition } from "./composition.js";
 
 export interface CliOptions {
-  command?: "give";
+  command?: "give" | "doctor";
+  fix?: boolean;
   directory?: string;
   output?: string;
   base?: string;

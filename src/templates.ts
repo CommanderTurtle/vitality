@@ -89,4 +89,9 @@ bun install
 bun run serve
 bun run build
 \`\`\`
+
+Check this wrapper with \`vitality doctor --dir .\`. Use
+\`vitality doctor --dir . --fix\` to select the registry's latest stable Vite
+and apply Bun's audit fixes. It backs up the manifest and lockfiles, skips
+lifecycle scripts, and leaves the production build explicit.
 `;

@@ -1,8 +1,9 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { UsageError } from "./args.js";
+import { version as viteVersion } from "vite";
+import { buildIdentity } from "./version.js";
 
-const viteVersion = "8.2.2";
 const typescriptVersion = "7.0.2";
 
 type JsonObject = Record<string, unknown>;
@@ -84,6 +85,7 @@ export async function writeWrapperPackage(
     devDependencies,
     packageManager: "bun@1.4.0",
     vitality: {
+      generator: await buildIdentity(),
       schemaVersion: 3,
       base,
       assetsInlineLimit: inlineAssets ? "Infinity" : "vite-default",
@@ -105,7 +107,7 @@ export async function updateGitignore(wrapper: string): Promise<void> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const required = ["node_modules/", "dist/", ".vite/"];
+  const required = ["node_modules/", "dist/", ".vite/", ".vitality/"];
   const existing = new Set(content.split(/\r?\n/u).map((line) => line.trim()));
   const missing = required.filter((line) => !existing.has(line));
   if (missing.length === 0) return;

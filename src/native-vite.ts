@@ -8,7 +8,7 @@ import { writeWrapperPackage, updateGitignore } from "./package-file.js";
 // Preserve an existing Vite project's sources and configuration. Never evaluate it here.
 export async function copyNativeVite(options: GiveOptions, destination: string, configName: string): Promise<Omit<ScaffoldReport, "elapsedMilliseconds">> {
   const result = { copiedFiles: 0, copiedBytes: 0, excludedEntries: 0, skippedLinks: 0, pages: [] as string[] };
-  const excluded = new Set([".git", "node_modules", "dist", "build", ".cache", ".vite", ".tmp", "coverage"]);
+  const excluded = new Set([".git", "node_modules", "dist", "build", ".cache", ".vite", ".vitality", ".tmp", "coverage"]);
   async function walk(dir: string, relative = "") {
     for (const item of await readdir(dir, { withFileTypes: true })) {
       const source = path.join(dir, item.name);

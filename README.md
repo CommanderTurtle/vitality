@@ -1,5 +1,34 @@
 # Vitality
 
+### Identify and maintain the actual toolchain
+
+`vitality --version` prints the package version, a fingerprint of the compiled
+code actually running, and its installed Vite version. Doctor also prints the
+resolved CLI path; a version number alone does not identify an older linked
+checkout. Generated wrappers record this identity in `package.json`.
+
+```bash
+vitality doctor --dir /path/to/mywrap         # read-only: latest stable + audit
+vitality doctor --dir /path/to/mywrap --fix   # back up, update Vite, install, audit fix
+```
+
+Doctor can target either a generated wrapper or the Vitality checkout itself.
+`--fix` selects npm's current stable `vite` release (including a new major),
+runs `bun install --ignore-scripts`, then `bun audit fix --ignore-scripts`.
+Native Vite plugins/configuration are preserved, but major upgrades may require
+their own compatibility changes; run your build afterwards. A registry error,
+failed install, unresolved audit, or missing/outdated installed Vite is not a
+clean doctor result. Backups live in `.vitality/doctor-*`; nothing is relinked
+globally, no source build is run, and deployment output is not regenerated.
+
+New static wrappers use the generator's installed Vite, not an independent
+stale pin. Native Vite source wrappers retain their source project's declared
+Vite until you explicitly repair them. Updating Vitality never retrofits an
+existing wrapper's copied runtime helpers: generate a fresh wrapper for those.
+
+To bypass a suspect global link, run `bun ./dist/cli.js doctor ...` or
+`bun ./dist/cli.js give ...` from your freshly built Vitality checkout.
+
 Vitality turns an already working browser project into a conventional,
 unbuilt TypeScript/Vite source project. It is a source giver: it does not
 install dependencies, run the source, or create `dist/`.

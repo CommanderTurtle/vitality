@@ -5,12 +5,12 @@ import { UsageError } from "./args.js";
 import { containsPath } from "./paths.js";
 
 const excludedDirectoryNames = new Set([
-  ".git", ".hg", ".svn", ".github", ".cache", ".tmp", ".vite", "node_modules",
+  ".git", ".hg", ".svn", ".github", ".cache", ".tmp", ".vite", ".vitality", "node_modules",
   "coverage", "dist", "build", "test", "tests", "__tests__", "docs", "tools",
 ]);
 
 const entrySearchExcludedDirectoryNames = new Set([
-  ".git", ".hg", ".svn", ".github", ".cache", ".tmp", ".vite", "node_modules",
+  ".git", ".hg", ".svn", ".github", ".cache", ".tmp", ".vite", ".vitality", "node_modules",
   "coverage", "dist", "build", "test", "tests", "__tests__", "tools",
 ]);
 

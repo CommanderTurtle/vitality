@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import process from "node:process";
-import { version as viteVersion } from "vite";
+import { buildIdentity } from "./version.js";
+import { doctor } from "./doctor.js";
 import { helpText, parseArguments, UsageError } from "./args.js";
 import { normalizeBase } from "./base.js";
 import { resolveSourceEntry } from "./copy.js";
@@ -12,8 +13,6 @@ import {
 } from "./paths.js";
 import { PromptSession } from "./prompts.js";
 import type { CliOptions, GiveOptions } from "./types.js";
-
-const vitalityVersion = "0.3.0";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -90,11 +89,16 @@ function printOperation(options: GiveOptions): void {
 async function main(): Promise<void> {
   const parsed = parseArguments(process.argv.slice(2));
   if (parsed.version) {
-    console.log(`vitality ${vitalityVersion} (Vite ${viteVersion})`);
+    const identity = await buildIdentity();
+    console.log(`vitality ${identity.version} (build ${identity.build}; Vite ${identity.vite})`);
     return;
   }
   if (parsed.help) {
     console.log(helpText);
+    return;
+  }
+  if (parsed.command === "doctor") {
+    process.exitCode = await doctor(parsed.directory ?? process.cwd(), Boolean(parsed.fix && !parsed.dryRun));
     return;
   }
   if (parsed.command !== "give") throw new UsageError("a command is required; use vitality give --dir PATH");

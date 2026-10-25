@@ -52,8 +52,8 @@ export function parseArguments(arguments_: string[]): CliOptions {
   let index = 0;
 
   const first = arguments_[0];
-  if (first === "give") {
-    options.command = "give";
+  if (first === "give" || first === "doctor") {
+    options.command = first;
     index = 1;
   } else if (first !== undefined && !first.startsWith("-")) {
     throw new UsageError(`unknown command: ${first}`);
@@ -115,9 +115,16 @@ export function parseArguments(arguments_: string[]): CliOptions {
       case "--dry-run":
         options.dryRun = true;
         break;
+      case "--fix":
+        options.fix = true;
+        break;
       default:
         throw new UsageError(`unknown option: ${name}`);
     }
+  }
+  if (options.fix && options.command !== "doctor") throw new UsageError("--fix is only supported by doctor");
+  if (options.command === "doctor" && (options.output !== undefined || options.base !== undefined || options.inlineAssets !== undefined || options.noPublic !== undefined)) {
+    throw new UsageError("doctor accepts --dir, --fix, and --dry-run only");
   }
   return options;
 }
@@ -127,6 +134,8 @@ export const helpText = `Vitality — wrap a standalone webapp in a ready-to-run
 Usage:
   vitality give --dir PATH
   vitality give --dir PATH --base /project/ --inline yes
+  vitality doctor --dir PATH/mywrap
+  vitality doctor --dir PATH/mywrap --fix
 
 The default output is PATH/mywrap. The source is never modified, and no dist
 bundle is created by give. Afterward:
@@ -143,7 +152,8 @@ Options:
       --no-inline          Keep Vite's normal asset inline limit
       --no-public [yes|no] Embed URL-loaded assets too; no public copy (implies inline)
       --dry-run            Validate and show the operation without writing
+      --fix                Doctor: update Vite to latest stable, install, audit fix
   -h, --help               Show this help
-  -v, --version            Show the Vitality and bundled Vite versions
+  -v, --version            Show Vitality, actual code fingerprint, and Vite
 
 Boolean options accept y/n, yes/no, true/false, on/off, or 1/0.`;

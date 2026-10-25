@@ -74,6 +74,10 @@ test("give creates an uninstalled TypeScript/Vite source project", { timeout: 30
   assert.equal(packageFile.vitality.base, "/project/");
   assert.equal(packageFile.vitality.assetsInlineLimit, "Infinity");
   assert.equal(packageFile.vitality.pages, 1);
+  const toolchain = JSON.parse(await readFile(path.join(repository, "node_modules/vite/package.json"), "utf8"));
+  assert.equal(packageFile.devDependencies.vite, toolchain.version);
+  assert.equal(packageFile.vitality.generator.vite, toolchain.version);
+  assert.match(packageFile.vitality.generator.build, /^[a-f0-9]{12}$/);
   const config = await readFile(path.join(wrapper, "vite.config.ts"), "utf8");
   assert.match(config, /assetsInlineLimit: Number\.POSITIVE_INFINITY/u);
   assert.doesNotMatch(config, /preserve|copyFile|standalone/iu);
@@ -125,6 +129,8 @@ test("no-public also preserves ordinary source modules and relative JSON fetches
   const source = await mkdtemp(path.join(os.tmpdir(), "vitality-inline-"));
   context.after(() => rm(source, { recursive: true, force: true }));
   await cp(path.join(fixtures, "configured"), source, { recursive: true });
+  // This is the ordinary static-source path, not the native Vite adapter.
+  await rm(path.join(source, "vite.config.js"));
   await mkdir(path.join(source, "data"));
   await writeFile(path.join(source, "data/index.json"), '{"entry":"child.json"}');
   await writeFile(path.join(source, "data/child.json"), '{"answer":42}');
@@ -142,6 +148,28 @@ test("no-public also preserves ordinary source modules and relative JSON fetches
   run(process.execPath, ["run", "--bun", "build"], wrapper);
   assert.deepEqual(await allFiles(path.join(wrapper, "dist")), ["assets/index.css", "assets/index.js", "index.html"]);
   run(process.execPath, ["-e", `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/nested/');await import('./dist/assets/index.js');if(globalThis.inlineAnswer!==42)throw Error('JSON graph failed');`], wrapper);
+});
+
+test("native Vite runtime initializes before source modules on current stable Vite", { timeout: 30_000 }, async context => {
+  const source = await mkdtemp(path.join(os.tmpdir(), "vitality-native-order-"));
+  context.after(() => rm(source, { recursive: true, force: true }));
+  await cp(path.join(fixtures, "configured"), source, { recursive: true });
+  await mkdir(path.join(source, "public/data"), { recursive: true });
+  await writeFile(path.join(source, "public/data/answer.json"), '{"answer":42}');
+  await writeFile(path.join(source, "src/main.js"), `
+    if (!globalThis.__vitalityNative) throw Error('native runtime initialized too late');
+    const result = await fetch(new URL('data/answer.json', location.href)).then(r => r.json());
+    globalThis.nativeAnswer = result.answer;
+  `);
+  run(process.execPath, [cli, "give", "-d", source, "-b", "/nested/", "--no-public"], repository);
+  const wrapper = path.join(source, "mywrap");
+  run("bun", ["install", "--ignore-scripts"], wrapper);
+  run("bun", ["run", "--bun", "build"], wrapper);
+  const files = await allFiles(path.join(wrapper, "dist"));
+  const entry = files.find(file => /^assets\/index-[\w-]+\.js$/.test(file));
+  assert.ok(entry);
+  assert.equal(files.some(file => file.endsWith(".json")), false);
+  run(process.execPath, ["-e", `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/nested/');await import(${JSON.stringify("./dist/" + entry)});if(globalThis.nativeAnswer!==42)throw Error('Native JSON fetch failed');`], wrapper);
 });
 
 test("give promotes a unique shallowest nested index as the site root", async (context) => {
