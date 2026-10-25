@@ -10,6 +10,13 @@ export interface EmbeddedPage {
   assets: string[];
   scripts: string[];
 }
+
+export function normalizeInlineScript(source: string): string {
+  // HTML parsing normalizes newlines. Downstream HTML serializers may also
+  // trim a text node's end: emit that canonical form before calculating CSP.
+  return source.replace(/<\/script/gi, "<\\/script").replace(/\r\n?/g, "\n").trimEnd();
+}
+
 export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selected?: Pick<EmbeddedPage, "assets" | "scripts">): Plugin {
   const select = (values: Record<string, string>, names?: string[]) => names ? Object.fromEntries(names.filter(name => Object.hasOwn(values, name)).map(name => [name, values[name]!])) : values;
   const allFiles: Record<string, string> = JSON.parse(readFileSync(path.join(root, "src/embedded-files.json"), "utf8"));
@@ -161,7 +168,7 @@ export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selecte
         const chunks = output.filter(item => item.type === "chunk");
         if (chunks.length !== 1) this.error("Secondary page must have one independent script: " + page.name);
         // Escape HTML's raw-text end marker without changing JS string values.
-        const code = chunks[0]!.code.replace(/<\/script/gi, "<\\/script");
+        const code = normalizeInlineScript(chunks[0]!.code);
         const hash = "'sha256-" + createHash("sha256").update(code).digest("base64") + "'";
         let html = readFileSync(path.resolve(root, page.name), "utf8")
           .replace(/%VITALITY_ASSET:([^%]+)%/g, (_all, name: string) => encode(Buffer.from(name, "base64url").toString("utf8")))

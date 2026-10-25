@@ -3,11 +3,22 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { embeddedAssets } from "../dist/embedded-assets-plugin.js";
+import { embeddedAssets, normalizeInlineScript } from "../dist/embedded-assets-plugin.js";
+import { createHash } from "node:crypto";
 import { compactConfig } from "../dist/native-vite-plugin.js";
 
 const call = (hook, context, ...args) => (typeof hook === "function" ? hook : hook.handler).call(context, ...args);
 const wasm = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
+
+test("inline CSP hashes survive HTML newline normalization and trailing-text trimming", () => {
+  const input = '// helper\r\nparent.postMessage({type:"ready"},location.origin);\r\n';
+  const code = normalizeInlineScript(input);
+  assert.equal(code, '// helper\nparent.postMessage({type:"ready"},location.origin);');
+  const digest = value => createHash("sha256").update(value).digest("base64");
+  assert.notEqual(digest(input.replace(/\r\n/g, "\n")), digest(code));
+  assert.equal(digest(code), digest(code.trimEnd()));
+  assert.equal(normalizeInlineScript('const end="</script>";\n'), 'const end="<\\/script>";');
+});
 function context() {
   const emitted = [];
   return { emitted, emitFile: file => (emitted.push(file), String(emitted.length)), addWatchFile() {}, info() {}, error(message) { throw new Error(message); } };

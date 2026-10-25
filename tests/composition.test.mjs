@@ -144,6 +144,7 @@ test("no-public preserves secondary page routes and embeds their CSS under their
   assert.match(page, /connect-src https: data:/);
   assert.doesNotMatch(page, /src="[^\"]*\.js|%VITALITY_ASSET:/);
   const code = page.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
+  assert.equal(code, code.trimEnd(), "serialized helper scripts must not lose a CSP-significant final newline");
   assert.ok(page.includes("'sha256-" + createHash('sha256').update(code).digest('base64') + "'"));
   const result = run(['-e', `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/site/');await import('./dist/assets/index.js');if(!globalThis.nativeReady)throw Error('not initialized');console.log('ordered, styled, extended');`], wrapper);
   assert.match(result.stdout, /ordered, styled, extended/);

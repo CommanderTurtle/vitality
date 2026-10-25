@@ -29,6 +29,11 @@ existing wrapper's copied runtime helpers: generate a fresh wrapper for those.
 To bypass a suspect global link, run `bun ./dist/cli.js doctor ...` or
 `bun ./dist/cli.js give ...` from your freshly built Vitality checkout.
 
+Secondary-page inline scripts use normalized line endings and no trailing
+whitespace before their CSP hash is calculated. This keeps the hash valid when
+another HTML serializer trims the script text's final newline. The emitted
+document URLs still need to be preserved by any downstream packaging layer.
+
 Vitality turns an already working browser project into a conventional,
 unbuilt TypeScript/Vite source project. It is a source giver: it does not
 install dependencies, run the source, or create `dist/`.
