@@ -1,5 +1,6 @@
 import path from "node:path";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript-parser";
 import { containsPath } from "./paths.js";
 import { UsageError } from "./args.js";
@@ -36,6 +37,12 @@ class Reader {
     if (item && "text" in item) return item.text;
     if (item && "module" in item) throw new UsageError("Compiled output cannot be read during source detection");
     return readFileSync(this.safe(item && "file" in item ? item.file : file), "utf8");
+  }
+  private fileURL(value: string | URL, base?: string | URL): URL {
+    const url = new URL(value, base);
+    if (url.protocol !== "file:") throw new UsageError("Source recipe requires a project-local file URL: " + url.href);
+    this.safe(fileURLToPath(url));
+    return url;
   }
   private lookup(scope: Scope, key: string): Value {
     if (scope.values.has(key)) return scope.values.get(key);
@@ -75,6 +82,7 @@ class Reader {
   }
   private property(value: Value, key: string): Value {
     if (["constructor", "prototype", "__proto__"].includes(key)) throw new UsageError("Unsupported property in source recipe");
+    if (value instanceof URL && key === "href") return value.href;
     if (value?.[fileHandle]) {
       const file = value[fileHandle] as string;
       if (key === "exists") return native(() => this.files.has(file) || existsSync(this.safe(file)));
@@ -111,7 +119,10 @@ class Reader {
       return new RegExp(node.text.slice(1, end), node.text.slice(end + 1));
     }
     if (ts.isIdentifier(node)) return this.lookup(scope, node.text);
-    if (ts.isMetaProperty(node) && node.getText() === "import.meta") return { dir: path.dirname(node.getSourceFile().fileName) };
+    if (ts.isMetaProperty(node) && node.getText() === "import.meta") {
+      const file = node.getSourceFile().fileName;
+      return { dir: path.dirname(file), url: pathToFileURL(file).href };
+    }
     if (ts.isTemplateExpression(node)) return node.head.text + node.templateSpans.map(span => String(this.expression(span.expression, scope)) + span.literal.text).join("");
     if (ts.isArrayLiteralExpression(node)) return node.elements.flatMap(item => ts.isSpreadElement(item)
       ? this.expression(item.expression, scope) : [this.expression(item as ts.Expression, scope)]);
@@ -150,6 +161,11 @@ class Reader {
     });
     if (ts.isCallExpression(node)) return this.invoke(this.expression(node.expression, scope),
       node.arguments.flatMap(item => ts.isSpreadElement(item) ? this.expression(item.expression, scope) : [this.expression(item, scope)]));
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "URL") {
+      const args = node.arguments;
+      if (!args?.length || args.length > 2) throw this.unsupported(node);
+      return this.fileURL(this.expression(args[0]!, scope), args[1] ? this.expression(args[1], scope) : undefined);
+    }
     if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Error") {
       return new UsageError(String(node.arguments?.[0] ? this.expression(node.arguments[0], scope) : "Invalid source recipe"));
     }
@@ -214,7 +230,9 @@ class Reader {
         }
       }),
     };
-    const paths = { join: native((...items) => path.join(...items)), resolve: native((...items) => path.resolve(...items)) };
+    const paths = { join: native((...items) => path.join(...items)), resolve: native((...items) => path.resolve(...items)),
+      dirname: native((file) => path.dirname(file)) };
+    const urls = { fileURLToPath: native((url) => this.safe(fileURLToPath(this.fileURL(url)))) };
     scope.values.set("Bun", {
       file: native((name) => ({ [fileHandle]: this.safe(name) })),
       write: native((name, value) => {
@@ -235,6 +253,7 @@ class Reader {
       let values: Map<string, Value>;
       if (specifier === "node:fs/promises") values = new Map(Object.entries(fs));
       else if (specifier === "node:path") values = new Map(Object.entries(paths));
+      else if (specifier === "node:url") values = new Map(Object.entries(urls));
       else if (specifier.startsWith(".")) {
         const target = path.resolve(path.dirname(file), specifier);
         const resolved = [target, target + ".ts", target + ".js"].find(item => existsSync(item) && lstatSync(item).isFile());

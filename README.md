@@ -75,6 +75,9 @@ Vite, Vitality can additionally read the script's local file mappings and data
 expressions. This runs only when normal entry detection cannot resolve a site.
 The source script is never executed, compiled, or retained as a build hook.
 Unsupported expressions produce a diagnostic instead of running arbitrary code.
+Project-local `fileURLToPath(new URL(..., import.meta.url))` paths are traced
+through staged renames; declared module filenames, including `.mjs`, keep their
+exact output URLs.
 
 The resulting `mywrap` uses ordinary TypeScript sources and Vite directly, with
 the same `--base` and `--inline` options. Local bootstraps and extensions become

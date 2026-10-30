@@ -15,8 +15,8 @@ function run(args, cwd = repository) {
   assert.equal(result.status, 0, result.stdout + result.stderr);
   return result;
 }
-async function fixture(context) {
-  const source = await mkdtemp(path.join(os.tmpdir(), "vitality-composed-"));
+async function fixture(context, prefix = "vitality-composed-") {
+  const source = await mkdtemp(path.join(os.tmpdir(), prefix));
   context.after(() => rm(source, { recursive: true, force: true }));
   for (const dir of ["scripts", "src", "source/native/assets", "source/unused"]) await mkdir(path.join(source, dir), { recursive: true });
   await writeFile(path.join(source, "package.json"), JSON.stringify({ name: "composed", type: "module", scripts: { build: "bun scripts/build.ts" } }));
@@ -94,6 +94,66 @@ test("unsupported source actions fail closed instead of executing", async contex
   assert.throws(() => detectComposition(source), /Unresolved source expression: fetch/);
   await assert.rejects(stat(path.join(source, 'dist')));
 });
+
+for (const noPublic of [false, true]) {
+  test(`file-URL recipes trace renamed module outputs exactly (no-public=${noPublic})`, async context => {
+    const source = await fixture(context, 'vitality-file-url # 100% café-');
+    const original = 'export const answer = 42;';
+    await writeFile(path.join(source, 'src/index.js'), original);
+    await writeFile(path.join(source, 'source/native/assets/native.js'), `
+      const entry = '/site/extensions/renamed.mjs';
+      const module = await import(entry);
+      globalThis.fileURLAnswer = module.answer;
+    `);
+    await writeFile(path.join(source, 'scripts/build.ts'), `
+import { cp, mkdir, rename } from 'node:fs/promises'
+import { join, dirname, resolve } from 'node:path'
+import { fileURLToPath as toPath } from 'node:url'
+const root = ${noPublic ? "resolve(dirname(toPath(import.meta.url)), '..')" : "toPath(new URL('../', import.meta.url))"}
+const stage = join(root, '.work/stage')
+await mkdir(stage, { recursive: true })
+await cp(join(root, 'source/native'), stage, { recursive: true })
+const result = await Bun.build({ entrypoints: [toPath(new URL('../src/index.js', import.meta.url))], format: 'esm', target: 'browser' })
+const from = toPath(new URL('../.work/stage/src/index.js', import.meta.url))
+const fileName = () => 'renamed.mjs'
+const to = toPath(new URL('../.work/stage/extensions/' + fileName(), import.meta.url).href)
+await Bun.write(from, result.outputs[0])
+await rename(from, to)
+await rename(stage, join(root, 'dist'))
+`);
+    const plan = detectComposition(source);
+    assert.equal(plan.files.get('extensions/renamed.mjs').module, path.join(source, 'src/index.js'));
+    assert.equal(plan.files.has('src/index.js'), false);
+    run(['dist/cli.js', 'give', '-d', source, '-b', '/site/', '--inline', 'y', '--no-public', noPublic ? 'y' : 'n']);
+    const wrapper = path.join(source, 'mywrap');
+    run(['install', '--ignore-scripts'], wrapper);
+    run(['run', '--bun', 'build'], wrapper);
+    if (noPublic) {
+      assert.deepEqual(await readdir(path.join(wrapper, 'dist/assets')), ['index.js']);
+      run(['-e', `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/site/');await import('./dist/assets/index.js');if(globalThis.fileURLAnswer!==42)throw Error('renamed module did not resolve');`], wrapper);
+    } else {
+      await stat(path.join(wrapper, 'dist/extensions/renamed.mjs'));
+      await assert.rejects(stat(path.join(wrapper, 'dist/extensions/renamed.mjs.js')));
+      run(['-e', `const module=await import('./dist/extensions/renamed.mjs');if(module.answer!==42)throw Error('renamed entry changed');`], wrapper);
+    }
+    assert.equal(await readFile(path.join(source, 'src/index.js'), 'utf8'), original);
+    await assert.rejects(stat(path.join(source, 'dist')));
+    await assert.rejects(stat(path.join(source, '.work')));
+  });
+}
+
+for (const target of ['../../outside-project.js', 'https://example.invalid/never-read.js']) {
+  test(`file-URL tracing rejects unsafe recipe targets: ${target}`, async context => {
+    const source = await fixture(context);
+    await writeFile(path.join(source, 'scripts/build.ts'), `
+import { fileURLToPath } from 'node:url'
+const entry = fileURLToPath(new URL(${JSON.stringify(target)}, import.meta.url))
+await Bun.build({ entrypoints: [entry] })
+`);
+    assert.throws(() => detectComposition(source), /outside the project|project-local file URL/);
+    await assert.rejects(stat(path.join(source, 'dist')));
+  });
+}
 
 test("no-public preserves secondary page routes and embeds their CSS under their own CSP", async context => {
   const source = await fixture(context);

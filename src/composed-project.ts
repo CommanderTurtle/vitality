@@ -128,8 +128,12 @@ export async function copyComposition(root: string, wrapper: string, plan: Compo
   }
   const input: Record<string, string> = { index: "index.html" };
   const routes: Record<string, string> = {};
+  const moduleOutputs: Record<string, string> = {};
   for (const [name, file] of modules) if (!eagerModules.has(name)) {
-    input[name.replace(/\.js$/i, "")] = sourceFiles.get(file)!;
+    // Input keys are internal; the recipe owns the final URL, including .mjs.
+    const key = "module-" + Object.keys(moduleOutputs).length;
+    input[key] = sourceFiles.get(file)!;
+    moduleOutputs[key] = name;
     routes[name] = sourceFiles.get(file)!;
   }
   const config = `import path from "node:path";
@@ -139,6 +143,7 @@ import { defineConfig } from "vite";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const input = ${JSON.stringify(input, null, 2)};
 const routes: Record<string, string> = ${JSON.stringify(routes, null, 2)};
+const moduleOutputs: Record<string, string> = ${JSON.stringify(moduleOutputs, null, 2)};
 const base = ${JSON.stringify(base)};
 export default defineConfig({
   root, base, publicDir: "public",
@@ -158,7 +163,7 @@ export default defineConfig({
       input: Object.fromEntries(Object.entries(input).map(([name, file]) => [name, path.resolve(root, file)])),
       external: ${JSON.stringify([...external])},
       preserveEntrySignatures: "strict",
-      output: { entryFileNames: chunk => chunk.name === "index" ? "assets/index.js" : "[name].js" },
+      output: { entryFileNames: chunk => chunk.name === "index" ? "assets/index.js" : moduleOutputs[chunk.name] ?? "[name].js" },
     },
   },
 });
