@@ -27,9 +27,10 @@ export async function give(options: GiveOptions): Promise<ScaffoldReport> {
       options.sourceIndex,
       options.output,
       temporary,
-      options.inlineAssets && !options.noPublic ? options.base : undefined,
-      options.libraryOutputs,
-      options.source,
+      !options.noPublic ? options.base : undefined,
+      { projectRoot: options.source, preserveCompilerURLs: !options.inlineAssets,
+        ...(options.libraryOutputs ? { outputs: options.libraryOutputs } : {}),
+        ...(options.libraryFiles ? { files: options.libraryFiles } : {}) },
     );
     await mkdir(path.join(temporary, "src"), { recursive: true });
     await Promise.all([
@@ -58,7 +59,7 @@ export async function give(options: GiveOptions): Promise<ScaffoldReport> {
     }
     if (options.noPublic) {
       const { embedPublicFiles } = await import("./no-public.js");
-      await embedPublicFiles(temporary, options.base, copied.pages, options.source, options.composition);
+      await embedPublicFiles(temporary, options.base, copied.pages, options.source, options.composition, copied.moduleOrigins);
     }
     await updateGitignore(temporary);
     await publishTemporary(temporary, options.output);

@@ -6,6 +6,13 @@ const web = (value: string) => value.split(path.sep).join("/");
 const javascript = /\.(?:[cm]?[jt]sx?)$/i;
 const browserModule = /\.(?:m?js)$/i;
 
+interface RuntimeLayout {
+  sourceNames?: ReadonlyMap<string, string>;
+  files?: ReadonlyMap<string, string>;
+  origins?: ReadonlyMap<string, string>;
+  preserveCompilerURLs?: boolean;
+}
+
 function importSpecifier(node: ts.StringLiteralLike): boolean {
   const parent = node.parent;
   return ((ts.isImportDeclaration(parent) || ts.isExportDeclaration(parent)) && parent.moduleSpecifier === node)
@@ -16,15 +23,16 @@ function importSpecifier(node: ts.StringLiteralLike): boolean {
 // dependency closure instead of embedding them or copying the entire source tree.
 export async function publicRuntime(
   inventory: string[], reachable: Set<string>, sourceRoot: string, base: string, initial: Set<string>,
-  sourceNames?: ReadonlyMap<string, string>,
+  layout: RuntimeLayout = {},
 ): Promise<{ files: Set<string>; modules: string[]; rewrite: (code: string, file: string) => string; rewriteJSON: (code: string, file: string) => string }> {
   const origin = "https://vitality.invalid/";
   const root = new URL(base && base !== "./" ? base : "/", origin);
-  const names = new Map(inventory.map(file => [sourceNames?.get(file) ?? web(path.relative(sourceRoot, file)), file]));
+  const names = new Map(inventory.map(file => [layout.sourceNames?.get(file) ?? web(path.relative(sourceRoot, file)), file]));
+  for (const [name, file] of layout.files ?? []) names.set(name, file);
   const namesByFile = new Map([...names].map(([name, file]) => [file, name]));
   const files = new Set(initial);
   const encode = (name: string) => name.split("/").map(encodeURIComponent).join("/");
-  const sourceURL = (file: string) => new URL(encode(namesByFile.get(file)!), root);
+  const sourceURL = (file: string) => new URL(encode(layout.origins?.get(file) ?? namesByFile.get(file)!), root);
   const nameOf = (url: URL): string | undefined => {
     if (url.origin !== root.origin) return;
     try { return decodeURIComponent(url.pathname.startsWith(root.pathname)
@@ -34,7 +42,11 @@ export async function publicRuntime(
   const locate = (value: string, file: string): URL | undefined => {
     if (!value.trim() || value === "." || value === ".." || /^(?:[a-z][\w+.-]*:|\/\/|#)/i.test(value)) return;
     for (const from of [sourceURL(file), root]) {
-      const url = new URL(value, from), name = nameOf(url);
+      // This scanner visits data strings too, not just URL arguments. An
+      // unparseable candidate is not a resource and must leave the source alone.
+      let url: URL;
+      try { url = new URL(value, from); } catch { continue; }
+      const name = nameOf(url);
       if (name !== undefined && (names.has(name) || (name.endsWith("/") && [...names.keys()].some(item => item.startsWith(name))))) return url;
     }
   };
@@ -74,7 +86,15 @@ export async function publicRuntime(
       const visit = (node: ts.Node) => {
         if (ts.isNewExpression(node) && node.expression.getText(source) === "URL") {
           // A nested URL is a base, not an instruction to publish its directory.
-          if (!(ts.isNewExpression(node.parent) && node.parent.arguments?.[1] === node)) add(expressionURL(node, file, source));
+          if (!(ts.isNewExpression(node.parent) && node.parent.arguments?.[1] === node)) {
+            const url = expressionURL(node, file, source);
+            // In n/n Vite owns literal file URLs and worker bundles. Publishing
+            // those too would restore the original + hashed duplicate defect.
+            // Directory/computed/manifest URLs still need a public closure.
+            const compilerFile = layout.preserveCompilerURLs && node.arguments?.[0] && ts.isStringLiteralLike(node.arguments[0])
+              && node.arguments?.[1]?.getText(source) === "import.meta.url" && url && names.has(nameOf(url) ?? "");
+            if (!compilerFile) add(url);
+          }
         } else if (ts.isStringLiteralLike(node)) {
           if (!(ts.isNewExpression(node.parent) && node.parent.expression.getText(source) === "URL")
             && (files.has(file) || !importSpecifier(node))) add(locate(node.text, file));
@@ -149,7 +169,7 @@ export async function publicRuntime(
             const pathname = boundary < 0 ? name : name.slice(0, boundary);
             const relative = path.posix.relative(path.posix.dirname("src/app/" + namesByFile.get(file)!), "public/" + pathname);
             const text = importSpecifier(node)
-              ? browserModule.test(pathname) ? JSON.stringify((relative.startsWith(".") ? relative : "./" + relative) + name.slice(pathname.length)) : undefined
+              ? JSON.stringify((relative.startsWith(".") ? relative : "./" + relative) + name.slice(pathname.length))
               : runtimeURL(name) + ".href";
             if (text !== undefined) edits.push({ start: node.getStart(source), end: node.end, text });
           }

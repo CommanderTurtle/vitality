@@ -4,22 +4,76 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import ts from "typescript-parser";
 import { glob } from "tinyglobby";
 import type { Plugin, UserConfig } from "vite";
+import { binaryAssetGlobs, binaryFile, engineAsset, engineFileName } from "./asset-policy.js";
 
 type CopyTarget = { src: string | string[]; dest: string; rename?: string | Function; transform?: Function | { encoding: BufferEncoding | "buffer"; handler: Function } };
 type CopyOptions = { targets: CopyTarget[]; structured?: boolean };
-const copies: CopyOptions[] = [];
+const copyOptions = Symbol("vitality-static-copy-options");
 // The copied config's normal targets/transforms become embedded resources, not loose files.
 export function viteStaticCopy(options: CopyOptions): Plugin {
-  copies.push(options);
-  return { name: "vitality-static-copy" };
+  return Object.assign({ name: "vitality-static-copy" }, { [copyOptions]: options });
+}
+
+export interface NativeLayout {
+  root?: string;
+  resources?: Record<string, string>;
+  origins?: Record<string, string>;
+}
+
+function libraryLayout(source: UserConfig, base: string, layout: NativeLayout, publish: boolean): UserConfig {
+  if (!Object.keys(layout.resources ?? {}).length && !Object.keys(layout.origins ?? {}).length) return source;
+  const root = layout.root ?? process.cwd();
+  const plugin: Plugin = {
+    name: "vitality-library-layout", enforce: "post",
+    async buildStart() {
+      if (!publish) return;
+      for (const [name, file] of Object.entries(layout.resources ?? {})) {
+        const absolute = path.resolve(root, file);
+        this.addWatchFile(absolute);
+        this.emitFile({ type: "asset", fileName: name, source: await readFile(absolute) });
+      }
+    },
+    transform(code, id) {
+      const origin = layout.origins?.[web(path.relative(root, id.split("?")[0]!))];
+      if (!origin) return;
+      // Vite has already bound source-relative assets/workers. Remaining
+      // import.meta URLs describe the declared library, not its source folder.
+      const parsed = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true);
+      const edits: { start: number; end: number; text: string }[] = [];
+      const visit = (node: ts.Node) => {
+        if (ts.isNewExpression(node) && ["Worker", "SharedWorker"].includes(node.expression.getText(parsed))) return;
+        if (ts.isPropertyAccessExpression(node) && node.getText(parsed) === "import.meta.url") {
+          // Compiler-generated file URL expressions retain their bundle base.
+          if (ts.isPropertyAccessExpression(node.parent) && /^(?:ROLLUP|ROLLDOWN)_FILE_URL_/.test(node.parent.name.text)) return;
+          edits.push({ start: node.getStart(parsed), end: node.end,
+            text: `new URL(${JSON.stringify(origin)}, globalThis.__vitalityNative?.root ?? new URL(${JSON.stringify(base || "./")}, globalThis.location.href)).href` });
+          return;
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(parsed);
+      for (const edit of edits.sort((a, b) => b.start - a.start)) code = code.slice(0, edit.start) + edit.text + code.slice(edit.end);
+      return edits.length ? { code, map: null } : null;
+    },
+  };
+  const workerPlugins = source.worker?.plugins;
+  return { ...source, plugins: [...source.plugins ?? [], plugin], worker: { ...source.worker,
+    plugins: () => [...workerPlugins?.() ?? [], plugin] } };
+}
+
+export function publicConfig(source: UserConfig, base: string, layout: NativeLayout = {}): UserConfig {
+  source = libraryLayout(source, base, layout, true);
+  return { ...source, base, assetsInclude: [...binaryAssetGlobs, ...[source.assetsInclude ?? []].flat()],
+    build: { ...source.build, outDir: path.resolve(layout.root ?? source.root ?? process.cwd(), "dist"), emptyOutDir: true,
+      assetsInlineLimit: file => !engineAsset(file) } };
 }
 
 const mime: Record<string, string> = { ".wasm": "application/wasm", ".js": "text/javascript", ".mjs": "text/javascript", ".json": "application/json", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp", ".ico": "image/x-icon", ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf", ".txt": "text/plain" };
 const web = (value: string) => value.split(path.sep).join("/");
 const ignored = /(?:^|\/)(?:licen[cs]e|notice|readme|changelog)(?:\.[^/]*)?$|\.map$/i;
-const engineAsset = (name: string) => /(?:^|\/)wasm\/|\.wasm(?:\.js)?$|\.(?:data|sf2|gz|tar)$/i.test(web(name));
 
-export function compactConfig(source: UserConfig, base: string): UserConfig {
+export function compactConfig(source: UserConfig, base: string, layout: NativeLayout = {}): UserConfig {
+  source = libraryLayout(source, base, layout, false);
   const root = path.resolve(source.root ?? process.cwd());
   const originalBase = source.base ?? "/";
   const publicDir = source.publicDir === false ? false : path.resolve(root, source.publicDir ?? "public");
@@ -39,10 +93,7 @@ export function compactConfig(source: UserConfig, base: string): UserConfig {
   }
   const emitted = new Map<string, Buffer>();
   function emitEngine(bytes: Buffer, name: string): string {
-    const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
-    const suffix = name.endsWith(".wasm.js") ? ".wasm.js" : path.extname(name);
-    const stem = path.basename(name, suffix).replace(/[^\w.-]/g, "-");
-    const filename = `assets/${stem}-${hash}${suffix}`;
+    const filename = engineFileName(name, bytes);
     emitted.set(filename, bytes);
     return base + filename;
   }
@@ -77,10 +128,18 @@ export function compactConfig(source: UserConfig, base: string): UserConfig {
     else register("data:" + (mime[path.extname(name)] ?? "application/octet-stream") + ";base64," + bytes.toString("base64"), name);
   }
   async function collect() {
+    for (const [name, file] of Object.entries(layout.resources ?? {})) await add(path.resolve(layout.root ?? root, file), name);
     if (publicDir) {
       try { for (const entry of await readdir(publicDir)) await add(path.join(publicDir, entry), entry); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     }
+    const copies: CopyOptions[] = [];
+    const visitPlugins = async (value: unknown): Promise<void> => {
+      value = await value;
+      if (Array.isArray(value)) { for (const plugin of value) await visitPlugins(plugin); }
+      else if (value && typeof value === "object" && copyOptions in value) copies.push((value as { [copyOptions]: CopyOptions })[copyOptions]);
+    };
+    await visitPlugins(source.plugins);
     for (const options of copies) {
       if (options.structured) throw new Error("No-public does not yet support structured static-copy targets");
       for (const target of options.targets) {
@@ -112,6 +171,13 @@ export function compactConfig(source: UserConfig, base: string): UserConfig {
   function transforms(worker = false): Plugin {
     return {
       name: "vitality-native-transform", enforce: "pre",
+      async load(id) {
+        const clean = binaryFile(id);
+        if (!clean || !path.isAbsolute(clean) || /[?&](?:raw|init)(?:[=&]|$)/.test(id)) return;
+        this.addWatchFile(clean);
+        const url = emitEngine(await readFile(clean), path.basename(clean));
+        return `export default new URL(${JSON.stringify(url)}, globalThis.__vitalityNative.root).href;`;
+      },
       async transform(code, id) {
         if (!/\.[cm]?[jt]sx?(?:\?|$)/.test(id) || id.includes("vitality-inline")) return;
         const parsed = ts.createSourceFile(id, code, ts.ScriptTarget.Latest, true, /\.tsx/.test(id) ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
@@ -144,11 +210,15 @@ export function compactConfig(source: UserConfig, base: string): UserConfig {
         const parsed = ts.createSourceFile(chunk.fileName, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
         const edits: { start: number; end: number; text: string }[] = [];
         function visit(node: ts.Node) {
-          if (ts.isStringLiteralLike(node) && node.text.length > 256 && /^data:[^,]+;base64,/.test(node.text)) {
+          if (ts.isStringLiteralLike(node) && /^data:[^,]+;base64,/.test(node.text)) {
+            const engineType = /^data:application\/(wasm|(?:x-)?gzip|x-(?:g)?tar);base64,/.exec(node.text)?.[1];
+            if (!engineType && node.text.length <= 256) return;
             const name = register(node.text);
-            // Vite can force worker assets inline; restore WASM as a hashed file.
-            if (node.text.startsWith("data:application/wasm;base64,")) {
-              assets[name] = emitEngine(Buffer.from(node.text.slice(node.text.indexOf(",") + 1), "base64"), "module.wasm");
+            // Vite can force library/worker assets inline. Restore every engine
+            // size, not just large WASM; archives have the same file contract.
+            if (engineType) {
+              const extension = engineType === "wasm" ? "wasm" : engineType.includes("gzip") ? "gz" : "tar";
+              assets[name] = emitEngine(Buffer.from(node.text.slice(node.text.indexOf(",") + 1), "base64"), "module." + extension);
             }
             edits.push({ start: node.getStart(parsed), end: node.end, text: `globalThis.__vitalityNative.asset(${JSON.stringify(name)})` });
             return;
@@ -207,13 +277,21 @@ export function compactConfig(source: UserConfig, base: string): UserConfig {
     } },
   };
   const workerPlugins = source.worker?.plugins;
+  const assetFileNames = (asset: { names: string[]; source: string | Uint8Array }) => engineAsset(asset.names[0] ?? "")
+    ? engineFileName(asset.names[0]!, asset.source) : "assets/[name]-[hash][extname]";
   return {
     ...source, root, base, publicDir: false,
+    assetsInclude: [...binaryAssetGlobs, ...[source.assetsInclude ?? []].flat()],
+    experimental: { ...source.experimental, renderBuiltUrl(filename, context) {
+      if (context.hostType === "js" && engineAsset(filename)) return { runtime: `new URL(${JSON.stringify(filename)}, globalThis.__vitalityNative.root).href` };
+      return source.experimental?.renderBuiltUrl?.(filename, context);
+    } },
     plugins: [plugin, transforms(), ...(source.plugins ?? [])],
     worker: { ...source.worker, format: "es", plugins: () => [...(workerPlugins?.() ?? []), transforms(true)],
-      rolldownOptions: { ...source.worker?.rolldownOptions, output: { codeSplitting: false } } },
-    build: { ...source.build, outDir: "dist", emptyOutDir: true, target: "esnext", assetsInlineLimit: file => !engineAsset(file), cssCodeSplit: false, modulePreload: false,
-      rolldownOptions: { ...source.build?.rolldownOptions, output: { codeSplitting: false, entryFileNames: "assets/index-[hash].js", assetFileNames: "assets/[name]-[hash][extname]" } } },
+      rolldownOptions: { ...source.worker?.rolldownOptions, output: { codeSplitting: false, assetFileNames } } },
+    build: { ...source.build, outDir: path.resolve(layout.root ?? root, "dist"), emptyOutDir: true, target: "esnext", assetsInlineLimit: file => !engineAsset(file), cssCodeSplit: false, modulePreload: false,
+      rolldownOptions: { ...source.build?.rolldownOptions, output: { codeSplitting: false, entryFileNames: "assets/index-[hash].js",
+        assetFileNames } } },
   };
 }
 
@@ -229,7 +307,8 @@ function installNative(assets: Record<string, string>, rootHref: string, oldBase
     if (url.origin !== root.origin) return;
     for (const prefix of [root.pathname, new URL(oldBase, root).pathname, "/"]) {
       if (!url.pathname.startsWith(prefix)) continue;
-      const name = decodeURIComponent(url.pathname.slice(prefix.length));
+      let name: string;
+      try { name = decodeURIComponent(url.pathname.slice(prefix.length)); } catch { return; }
       if (own(name)) return name;
       const companion = name.replace(/-[a-f0-9]{16}(?=\.[\w.]+$)/, "");
       if (companion !== name && own(companion)) return companion;

@@ -79,7 +79,7 @@ test("give creates an uninstalled TypeScript/Vite source project", { timeout: 30
   assert.equal(packageFile.vitality.generator.vite, toolchain.version);
   assert.match(packageFile.vitality.generator.build, /^[a-f0-9]{12}$/);
   const config = await readFile(path.join(wrapper, "vite.config.ts"), "utf8");
-  assert.match(config, /assetsInlineLimit: Number\.POSITIVE_INFINITY/u);
+  assert.match(config, /assetsInlineLimit: file => engineAsset\(file\) \? false : true/u);
   assert.doesNotMatch(config, /preserve|copyFile|standalone/iu);
 
   run("bun", ["install"], wrapper);

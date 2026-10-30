@@ -161,7 +161,7 @@ test("composed TS sources become Vite inputs without executing the source builde
   assert.equal(pkg.scripts.build, 'vite build');
   assert.equal(pkg.scripts['source:build'], undefined);
   const config = await readFile(path.join(wrapper, 'vite.config.ts'), 'utf8');
-  assert.match(config, /Number.POSITIVE_INFINITY/);
+  assert.match(config, /assetsInlineLimit: file => engineAsset\(file\) \? false : true/);
   assert.doesNotMatch(config, /spawn|Bun\.build|source:build|scripts\/build/);
   const main = await readFile(path.join(wrapper, 'src/main.ts'), 'utf8');
   assert.ok(main.indexOf('boot.ts') < main.indexOf('assets/native.js'));

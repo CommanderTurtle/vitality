@@ -177,14 +177,15 @@ explicitly. Supplying `--base` skips the base question.
 
 ## Asset inlining
 
-The inline question controls exactly one Vite option:
+The inline question controls Vite's threshold for ordinary imported assets:
 
 ```ts
-assetsInlineLimit: Number.POSITIVE_INFINITY
+assetsInlineLimit: file => engineAsset(file) ? false : true
 ```
 
-Answering No leaves Vite's default threshold. In normal mode, imported-asset
-behavior remains Vite's behavior: this limit does **not** embed `public/`.
+Answering No leaves Vite's default threshold for ordinary assets. WASM, TAR,
+GZ, DATA and SF2 sidecars remain byte-preserving files in every mode.
+`public/` means the local deployment directory; its contents ship in `dist/`.
 The n/n path uses the same content-hashed runtime asset names in the main and
 worker builds, so shared WASM, module sidecars, and images emit once.
 
@@ -204,6 +205,17 @@ In y/n static-folder wraps, URL-loaded JS/MJS modules, workers, and their local
 dependencies retain their public paths. Explicit engine-directory URLs preserve
 that directory's files, including WASM. Runtime references follow the selected
 base; public module imports retain query strings and work with relative bases.
+
+Unbuilt library recipes retain both their declared JS output names and explicit
+local filesystem copies into that output. Vitality reads these declarations,
+including finite copy loops, without running preparation or the source builder.
+Library source imports use physical paths; runtime resource URLs use the declared
+library location. The same layout feeds public and no-public delivery.
+
+Resource handling has three boundaries: discovery/layout (`composition.ts`,
+`copy.ts`), browser URL identity (`public-runtime.ts`, `no-public.ts`, native
+adapter), and binary emission (`asset-policy.ts`, shared by both embed plugins).
+A missing file, a wrong URL, and changed/duplicated bytes are separate failures.
 
 ### No-public mode
 

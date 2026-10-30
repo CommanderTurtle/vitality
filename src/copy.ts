@@ -45,6 +45,7 @@ export interface CopySummary {
   skippedLinks: number;
   pages: string[];
   runtimeModules?: string[];
+  moduleOrigins?: Map<string, string>;
 }
 
 interface SourceInventory {
@@ -538,15 +539,47 @@ export function temporarySibling(source: string, output: string): string {
   );
 }
 
+export async function libraryModuleOrigins(
+  outputs: ReadonlyMap<string, string> | undefined, files: string[], sourceRoot: string,
+): Promise<Map<string, string>> {
+  const known = new Set(files);
+  const aliases = new Map([...outputs ?? []].map(([name, file]) => [path.resolve(sourceRoot, name), file]));
+  const origins = new Map<string, string>();
+  // Imports remain physical source dependencies; only their browser identity
+  // follows the library bundle that contains them. Workers have their own graph.
+  for (const [name, entry] of outputs ?? []) {
+    const pending = [entry];
+    while (pending.length) {
+      const file = pending.pop()!;
+      if (origins.has(file)) continue;
+      origins.set(file, name);
+      if (!/\.(?:[cm]?[jt]sx?)$/i.test(file)) continue;
+      const code = await readFile(file, "utf8");
+      for (const match of code.matchAll(importPattern)) {
+        const target = resolveReference(file, match[2]!, known, sourceRoot, aliases);
+        if (target && /\.(?:[cm]?[jt]sx?)$/i.test(target)) pending.push(target);
+      }
+    }
+  }
+  return origins;
+}
+
+interface CopyLayout {
+  projectRoot?: string;
+  outputs?: ReadonlyMap<string, string>;
+  files?: ReadonlyMap<string, string>;
+  preserveCompilerURLs?: boolean;
+}
+
 export async function copyProject(
   sourceRoot: string,
   sourceIndex: string,
   output: string,
   temporary: string,
   runtimeBase?: string,
-  libraryOutputs?: ReadonlyMap<string, string>,
-  projectRoot = sourceRoot,
+  layout: CopyLayout = {},
 ): Promise<CopySummary> {
+  const { projectRoot = sourceRoot, outputs: libraryOutputs, files: libraryFiles, preserveCompilerURLs = false } = layout;
   const found = await inventory(sourceRoot, output, temporary);
   const aliases = new Map([...libraryOutputs ?? []].map(([name, file]) => [path.resolve(sourceRoot, name), file]));
   const libraryDirectories = new Set([...aliases.values()].filter(file => !containsPath(sourceRoot, file)).map(file => path.dirname(file)));
@@ -563,6 +596,7 @@ export async function copyProject(
   const sourceNames = new Map(found.files.map(file => [file, containsPath(sourceRoot, file)
     ? webPath(path.relative(sourceRoot, file)) : libraryPrefix + "/" + webPath(path.relative(projectRoot, file))]));
   const known = new Set(found.files);
+  const origins = await libraryModuleOrigins(libraryOutputs, found.files, sourceRoot);
   const reachable = await discoverReachable(found.files, sourceIndex, sourceRoot, aliases);
   const appRoot = path.join(temporary, "src", "app");
   const publicRoot = path.join(temporary, "public");
@@ -570,7 +604,9 @@ export async function copyProject(
   const classicScripts = await discoverClassicScripts(found.files, reachable, sourceRoot, aliases);
   const publicFiles = new Set([...publicJson, ...classicScripts]);
   const runtime = runtimeBase === undefined ? undefined
-    : await publicRuntime(found.files, reachable, sourceRoot, runtimeBase, publicFiles, sourceNames);
+    : await publicRuntime(found.files, reachable, sourceRoot, runtimeBase, publicFiles, {
+      sourceNames, origins, preserveCompilerURLs, ...(libraryFiles ? { files: libraryFiles } : {}),
+    });
   if (runtime) for (const file of runtime.files) publicFiles.add(file);
   const modules = await discoverModules(found.files, reachable, sourceRoot, aliases);
   for (const file of found.files) {
@@ -592,6 +628,14 @@ export async function copyProject(
   await mkdir(appRoot, { recursive: true });
   let copiedFiles = 0;
   let copiedBytes = 0;
+  for (const [name, file] of libraryFiles ?? []) {
+    const destination = path.resolve(publicRoot, name);
+    if (!containsPath(publicRoot, destination)) throw new UsageError("Resource output leaves the wrapper: " + name);
+    await mkdir(path.dirname(destination), { recursive: true });
+    const bytes = await readFile(file);
+    await writeFile(destination, runtime && /\.json$/i.test(name) ? runtime.rewriteJSON(bytes.toString("utf8"), file) : bytes);
+    copiedFiles++; copiedBytes += bytes.length;
+  }
   for (const file of found.files) {
     if (file === sourceIndex) continue;
     const destination = destinations.get(file);
@@ -637,6 +681,10 @@ export async function copyProject(
     excludedEntries: found.excludedEntries,
     skippedLinks: found.skippedLinks,
     ...(runtime ? { runtimeModules: runtime.modules } : {}),
+    moduleOrigins: new Map([...origins].flatMap(([file, name]) => {
+      const destination = destinations.get(file);
+      return destination ? [[webPath(path.relative(temporary, destination)), name] as const] : [];
+    })),
     pages: [...destinations.entries()]
       .filter(([sourceFile, destination]) => (
         /\.html?$/iu.test(sourceFile) && !containsPath(publicRoot, destination)

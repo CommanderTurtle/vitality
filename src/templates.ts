@@ -1,3 +1,5 @@
+import { binaryAssetGlobs, engineAsset } from "./asset-policy.js";
+
 export function renderViteConfig(base: string, inlineAssets: boolean, pages: string[], runtimeModules: string[] = []): string {
   const relativeBase = !base || base === "./";
   const publicModules = runtimeModules.map(name => (relativeBase ? "/" : base) + name.split("/").map(encodeURIComponent).join("/"));
@@ -48,6 +50,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
+const engineAsset = ${engineAsset.toString()};
 const input = ${JSON.stringify(input, null, 2)};
 ${publicModules.length ? `const publicModuleURLs = ${JSON.stringify(publicModules)};
 let publicModuleBuild = false;
@@ -60,13 +63,14 @@ export default defineConfig({
   root,
   base: ${JSON.stringify(base)},
   publicDir: "public",
+  assetsInclude: ${JSON.stringify(binaryAssetGlobs)},
   ${publicPlugin}
   build: {
     outDir: "dist",
     emptyOutDir: true,
     cssCodeSplit: false,
     modulePreload: false,
-    ${inlineAssets ? "assetsInlineLimit: Number.POSITIVE_INFINITY," : "// assetsInlineLimit: Vite default,"}
+    assetsInlineLimit: file => engineAsset(file) ? false : ${inlineAssets ? "true" : "undefined"},
     rolldownOptions: {
       input: Object.fromEntries(
         Object.entries(input).map(([name, file]) => [name, path.resolve(root, file)]),

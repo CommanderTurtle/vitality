@@ -2,6 +2,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { build, type Plugin } from "vite";
+import { binaryAssetGlobs, binaryAsset, binaryFile, engineAsset, engineFileName } from "./asset-policy.js";
 
 // Copied into opt-in wrappers. This runs during the user's Vite command, never give.
 export interface EmbeddedPage {
@@ -37,15 +38,20 @@ export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selecte
   const active = new Set<string>();
   const emitted = new Set<string>();
   let emit: (fileName: string, source: Buffer) => void;
-  const engineAsset = (name: string) => /\.wasm(?:\.js)?$|\.(?:data|sf2|gz|tar)$/i.test(name);
   function engineURL(name: string, bytes: Buffer): string {
-    const suffix = name.endsWith(".wasm.js") ? ".wasm.js" : path.extname(name);
-    const stem = path.basename(name, suffix).replace(/[^\w.-]/g, "-");
-    const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
-    const fileName = `assets/${stem}-${hash}${suffix}`;
+    const fileName = engineFileName(name, bytes);
     if (!emitted.has(fileName)) { emit(fileName, bytes); emitted.add(fileName); }
     return base + fileName;
   }
+  const builtURL = (filename: string, context: { hostType: string }) => context.hostType === "js" && engineAsset(filename)
+    ? { runtime: `new URL(${JSON.stringify(filename)}, globalThis.__vitalityEmbedded.root).href` } : undefined;
+  const binaryModule = (id: string, watch: (file: string) => void) => {
+    const clean = binaryFile(id);
+    if (!clean || !path.isAbsolute(clean) || /[?&](?:raw|init)(?:[=&]|$)/.test(id)) return;
+    watch(clean);
+    const url = engineURL(path.basename(clean), readFileSync(clean));
+    return `export default new URL(${JSON.stringify(url)}, globalThis.__vitalityEmbedded.root).href;`;
+  };
   function target(value: string, from: string): string | undefined {
     if (/^(?:[a-z][\w+.-]*:|\/\/|#)/i.test(value)) return;
     const clean = value.split(/[?#]/)[0] ?? "";
@@ -99,6 +105,7 @@ export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selecte
   return {
     name: "vitality-embedded-assets",
     enforce: "pre",
+    config() { return { assetsInclude: binaryAssetGlobs, experimental: { renderBuiltUrl: builtURL } }; },
     configResolved(config) { base = config.base; },
     buildStart() {
       cache.clear(); active.clear(); emitted.clear();
@@ -108,6 +115,11 @@ export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selecte
     handleHotUpdate() { cache.clear(); active.clear(); },
     resolveId(id) { if (id === "virtual:vitality-assets") return "\0vitality-assets"; },
     async load(id) {
+      // Imported binaries (including dependency/worker imports) need the same
+      // file policy as manifest assets. Vite library builds otherwise force
+      // these into data URLs even when assetsInlineLimit returns false.
+      const binary = binaryModule(id, file => this.addWatchFile(file));
+      if (binary) return binary;
       if (id !== "\0vitality-assets") return;
       const scriptData: Record<string, string> = {};
       for (const [name, file] of Object.entries(classic)) {
@@ -121,15 +133,21 @@ export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selecte
         this.addWatchFile(path.resolve(root, file));
         // URL-based workers/scripts need an independent bundle, embedded in the
         // main payload rather than emitted as a separate deployment file.
-        const result = await build({ root, configFile: false, publicDir: false, logLevel: "error",
-          build: { write: false, target: "esnext", assetsInlineLimit: Infinity, modulePreload: false,
-            lib: { entry: path.resolve(root, file), formats: ["es"], fileName: "script" },
-            rolldownOptions: { output: { codeSplitting: false } } } });
+        const result = await build({ root, base, configFile: false, publicDir: false, logLevel: "error", assetsInclude: binaryAssetGlobs,
+          plugins: [{ name: "vitality-script-binaries", enforce: "pre", load(id) { return binaryModule(id, file => this.addWatchFile(file)); } }],
+          experimental: { renderBuiltUrl: builtURL },
+          build: { write: false, target: "esnext", assetsInlineLimit: file => !engineAsset(file), modulePreload: false,
+            rolldownOptions: { input: path.resolve(root, file), preserveEntrySignatures: "strict", output: { format: "es", codeSplitting: false,
+              assetFileNames: asset => engineFileName(asset.names[0] ?? "binary", asset.source) } } } });
         const outputs = (Array.isArray(result) ? result : [result]).flatMap(item => "output" in item ? item.output : []);
-        if (outputs.length !== 1 || outputs[0]?.type !== "chunk") {
+        const chunks = outputs.filter(item => item.type === "chunk");
+        if (chunks.length !== 1 || outputs.some(item => item.type === "asset" && !engineAsset(item.fileName))) {
           this.error("URL script needs additional output; cannot embed safely: " + name);
         }
-        scriptData[name] = Buffer.from(outputs[0].code).toString("base64");
+        for (const item of outputs) if (item.type === "asset" && !emitted.has(item.fileName)) {
+          this.emitFile({ type: "asset", fileName: item.fileName, source: item.source }); emitted.add(item.fileName);
+        }
+        scriptData[name] = Buffer.from(chunks[0]!.code).toString("base64");
       }
       // Original and copied paths can address the same binary; store its bytes once.
       const values = new Map<string, string>();
@@ -150,6 +168,10 @@ export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selecte
       return html.replace(/%VITALITY_ASSET:([^%]+)%/g, (_all, name: string) => encode(Buffer.from(name, "base64url").toString("utf8")));
     } },
     generateBundle: { order: "post", async handler(_options, bundle) {
+      // Compiler-discovered sidecars use the same naming/byte policy as the
+      // manifest; accept those too, without accepting arbitrary loose output.
+      for (const item of Object.values(bundle)) if (item.type === "asset" && binaryAsset(item.fileName)
+        && item.names.some(name => engineFileName(name, item.source) === item.fileName)) emitted.add(item.fileName);
       const unexpected = Object.keys(bundle).filter(name => {
         if (name.endsWith(".html") || emitted.has(name)) return false;
         return name !== "assets/index.js" && name !== "assets/index.css";

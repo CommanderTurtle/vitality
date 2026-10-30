@@ -10,6 +10,10 @@ export interface Composition {
   script: string;
   files: Map<string, ComposedFile>;
 }
+export interface LibraryPlan {
+  outputs: Map<string, string>;
+  files: Map<string, string>;
+}
 type Value = any;
 interface Scope { values: Map<string, Value>; parent?: Scope }
 const callable = Symbol("static-operation");
@@ -24,6 +28,7 @@ class Reader {
   readonly files = new Map<string, ComposedFile>();
   private readonly loaded = new Map<string, Scope>();
   private readonly pathScopes = new Map<string, Scope>();
+  private readonly outputDirectories = new Set<string>();
   private budget = 100_000;
   constructor(private readonly root: string) {}
   private safe(file: string): string {
@@ -82,6 +87,7 @@ class Reader {
   }
   private copy(from: string, to: string): void {
     this.safe(from); this.safe(to);
+    if (path.basename(from).startsWith(".env")) return;
     if (lstatSync(from).isSymbolicLink()) throw new UsageError("Symlink in source recipe: " + from);
     if (lstatSync(from).isDirectory()) {
       for (const name of readdirSync(from)) {
@@ -224,8 +230,7 @@ class Reader {
   private statements(nodes: ts.NodeArray<ts.Statement>, scope: Scope): Value {
     for (const node of nodes) { const result = this.statement(node, scope); if (result) return result; }
   }
-  // Read only declarations needed by a library's entry/name fields. Preparation,
-  // downloads, plugin callbacks and all other recipe statements stay unevaluated.
+  // Read declarations on demand. Preparation and plugin callbacks stay unevaluated.
   private pathScope(file: string): Scope {
     this.safe(file);
     const cached = this.pathScopes.get(file);
@@ -234,6 +239,9 @@ class Reader {
     this.pathScopes.set(file, scope);
     const paths = { join: native((...items) => path.join(...items)), resolve: native((...items) => path.resolve(...items)), dirname: native(file => path.dirname(file)) };
     const urls = { fileURLToPath: native(url => this.safe(fileURLToPath(this.fileURL(url)))) };
+    scope.values.set("Object", { keys: native(value => Object.keys(value)), values: native(value => Object.values(value)), entries: native(value => Object.entries(value)) });
+    scope.values.set("JSON", { parse: native(value => JSON.parse(value)) });
+    scope.values.set("Bun", { file: native(name => ({ [fileHandle]: this.localPath(name) })) });
     const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
     for (const node of source.statements) {
       if (ts.isVariableStatement(node)) {
@@ -253,6 +261,9 @@ class Reader {
               const target = this.safe(path.resolve(path.dirname(file), specifier));
               const resolved = [target, target + ".ts", target + ".js", target + ".mjs"].find(item => existsSync(item) && lstatSync(item).isFile());
               if (resolved) return this.lookup(this.pathScope(resolved), key);
+            }
+            if (["node:fs", "node:fs/promises"].includes(specifier) && ["readFile", "readFileSync"].includes(key)) {
+              return native(name => this.read(this.localPath(name)));
             }
             throw new UsageError("Unsupported source path import: " + specifier + " (" + key + ")");
           } });
@@ -289,6 +300,7 @@ class Reader {
           const rootNode = property(config, "root"), outNode = property(build, "outDir"), formatNode = property(lib, "formats");
           const root = this.safe(path.resolve(this.root, rootNode ? this.expression(rootNode, scope) : this.root));
           const out = this.safe(path.resolve(root, outNode ? this.expression(outNode, scope) : "dist"));
+          this.outputDirectories.add(out);
           const formats = formatNode ? this.expression(formatNode, scope) : ["es"];
           if (!Array.isArray(formats)) throw this.unsupported(formatNode!);
           const entries = this.expression(entry, scope);
@@ -324,6 +336,89 @@ class Reader {
     };
     visit(source);
     return outputs;
+  }
+  private localPath(value: string | URL): string {
+    return this.safe(value instanceof URL ? fileURLToPath(this.fileURL(value)) : path.resolve(this.root, value));
+  }
+  libraryFiles(script: string): Map<string, string> {
+    if (!this.outputDirectories.size) return new Map();
+    const source = ts.createSourceFile(script, this.read(script), ts.ScriptTarget.Latest, true);
+    const scope = this.pathScope(script);
+    const operations = new Map<string, string>();
+    for (const node of source.statements) if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)
+      && ["node:fs", "node:fs/promises"].includes(node.moduleSpecifier.text)) {
+      const bindings = node.importClause?.namedBindings;
+      if (bindings && ts.isNamedImports(bindings)) for (const item of bindings.elements) {
+        const name = item.propertyName?.text ?? item.name.text;
+        if (["cp", "copyFile", "cpSync", "copyFileSync", "rename", "renameSync", "rm", "rmSync"].includes(name)) operations.set(item.name.text, name);
+      }
+    }
+    // Trace explicit copies into the same in-memory output overlay used by
+    // prebuilt recipes. Never run the builder, downloads, or arbitrary helpers.
+    const containsCopy = (node: ts.Node): boolean => {
+      if (ts.isFunctionLike(node)) return false;
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && operations.has(node.expression.text)) return true;
+      let found = false;
+      ts.forEachChild(node, child => { if (containsCopy(child)) found = true; });
+      return found;
+    };
+    const visit = (node: ts.Node, local: Scope): void => {
+      if (!containsCopy(node)) return;
+      if (ts.isForOfStatement(node) && ts.isVariableDeclarationList(node.initializer)) {
+        const values = this.expression(node.expression, local);
+        if (!Array.isArray(values)) throw this.unsupported(node.expression);
+        for (const value of values) {
+          const iteration: Scope = { values: new Map(), parent: local };
+          this.bind(node.initializer.declarations[0]!.name, value, iteration);
+          visit(node.statement, iteration);
+        }
+        return;
+      }
+      if (ts.isIfStatement(node)) {
+        const branch = this.expression(node.expression, local) ? node.thenStatement : node.elseStatement;
+        if (branch) visit(branch, local);
+        return;
+      }
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && operations.has(node.expression.text)) {
+        const operation = operations.get(node.expression.text)!;
+        if (node.arguments.length < 1) throw this.unsupported(node);
+        const from = this.localPath(this.expression(node.arguments[0]!, local));
+        if (operation === "rm" || operation === "rmSync") {
+          for (const file of this.files.keys()) if (containsPath(from, file)) this.files.delete(file);
+          return;
+        }
+        if (node.arguments.length < 2) throw this.unsupported(node);
+        const to = this.localPath(this.expression(node.arguments[1]!, local));
+        if (operation.startsWith("rename")) {
+          for (const [file, item] of [...this.files]) if (containsPath(from, file)) {
+            this.files.set(path.join(to, path.relative(from, file)), item); this.files.delete(file);
+          }
+        } else this.copy(from, to);
+        return;
+      }
+      if (ts.isBlock(node) || ts.isSourceFile(node)) {
+        const block: Scope = { values: new Map(), parent: local };
+        for (const item of node.statements) {
+          // Local path declarations in finite copy loops are also lazy.
+          if (ts.isVariableStatement(item)) for (const declaration of item.declarationList.declarations) {
+            if (ts.isIdentifier(declaration.name) && declaration.initializer) block.values.set(declaration.name.text,
+              { [deferred]: () => this.expression(declaration.initializer!, block) });
+          }
+          visit(item, block);
+        }
+        return;
+      }
+      ts.forEachChild(node, child => visit(child, local));
+    };
+    visit(source, scope);
+    const result = new Map<string, string>();
+    for (const [file, item] of this.files) if ("file" in item) for (const directory of this.outputDirectories) {
+      if (!containsPath(directory, file)) continue;
+      const name = path.relative(directory, file).split(path.sep).join("/");
+      if (result.has(name) && result.get(name) !== item.file) throw new UsageError("Ambiguous source resource output: " + name);
+      result.set(name, item.file);
+    }
+    return result;
   }
   load(file: string): Scope {
     this.safe(file);
@@ -383,17 +478,24 @@ class Reader {
   }
 }
 
-export function detectLibraryOutputs(root: string): Map<string, string> {
+export function detectLibraryPlan(root: string): LibraryPlan {
+  const empty = () => ({ outputs: new Map<string, string>(), files: new Map<string, string>() });
   const packageFile = path.join(root, "package.json");
-  if (!existsSync(packageFile)) return new Map();
+  if (!existsSync(packageFile)) return empty();
   let pkg;
-  try { pkg = JSON.parse(readFileSync(packageFile, "utf8")); } catch { return new Map(); }
+  try { pkg = JSON.parse(readFileSync(packageFile, "utf8")); } catch { return empty(); }
   const match = typeof pkg.scripts?.build === "string"
     ? /^(?:bun|node)\s+(?:run\s+)?["']?([^"'\s]+\.[cm]?[jt]s)["']?(?:\s|$)/.exec(pkg.scripts.build.trim()) : null;
-  if (!match) return new Map();
+  if (!match) return empty();
   const script = path.resolve(root, match[1]!);
-  if (!containsPath(root, script) || !existsSync(script)) return new Map();
-  return new Reader(root).libraryOutputs(script);
+  if (!containsPath(root, script) || !existsSync(script)) return empty();
+  const reader = new Reader(root);
+  const outputs = reader.libraryOutputs(script);
+  return { outputs, files: reader.libraryFiles(script) };
+}
+
+export function detectLibraryOutputs(root: string): Map<string, string> {
+  return detectLibraryPlan(root).outputs;
 }
 
 export function detectComposition(root: string): Composition | undefined {

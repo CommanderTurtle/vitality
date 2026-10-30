@@ -5,12 +5,15 @@ import ts from "typescript-parser";
 import { containsPath } from "./paths.js";
 import type { GiveOptions, ScaffoldReport } from "./types.js";
 import { writeWrapperPackage, updateGitignore } from "./package-file.js";
+import { libraryModuleOrigins } from "./copy.js";
+import { binaryAssetGlobs, engineAsset } from "./asset-policy.js";
 
 // Preserve an existing Vite project's sources and configuration. Never evaluate it here.
 export async function copyNativeVite(options: GiveOptions, destination: string, configName: string): Promise<Omit<ScaffoldReport, "elapsedMilliseconds">> {
   const result = { copiedFiles: 0, copiedBytes: 0, excludedEntries: 0, skippedLinks: 0, pages: [] as string[] };
   const excluded = new Set([".git", "node_modules", "dist", "build", ".cache", ".vite", ".vitality", ".tmp", "coverage"]);
   const aliases = new Map([...options.libraryOutputs ?? []].map(([name, file]) => [path.resolve(options.siteRoot, name), file]));
+  const sourceFiles: string[] = [];
   function bindLibraryReferences(file: string, code: string): string {
     if (!aliases.size) return code;
     const parsed = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true);
@@ -53,6 +56,7 @@ export async function copyNativeVite(options: GiveOptions, destination: string, 
         if (excluded.has(item.name) || generated) { result.excludedEntries++; continue; }
         await walk(source, name);
       } else if (item.isFile() && !/^\.env(?:\.|$)/i.test(item.name)) {
+        sourceFiles.push(source);
         const output = path.join(destination, name);
         await mkdir(path.dirname(output), { recursive: true });
         if (aliases.size && /\.(?:[cm]?[jt]sx?)$/i.test(source)) await writeFile(output, bindLibraryReferences(source, await readFile(source, "utf8")));
@@ -63,6 +67,18 @@ export async function copyNativeVite(options: GiveOptions, destination: string, 
     }
   }
   await walk(options.source);
+  const resources: Record<string, string> = {};
+  for (const [name, file] of options.libraryFiles ?? []) {
+    const relative = "vitality-resources/" + name;
+    const target = path.resolve(destination, relative);
+    if (!containsPath(path.join(destination, "vitality-resources"), target)) throw new Error("Resource output escapes wrapper: " + name);
+    await mkdir(path.dirname(target), { recursive: true });
+    await cp(file, target);
+    resources[name] = relative;
+  }
+  const origins = Object.fromEntries([...await libraryModuleOrigins(options.libraryOutputs, sourceFiles, options.siteRoot)]
+    .map(([file, name]) => [path.relative(options.source, file).split(path.sep).join("/"), name]));
+  const layoutNeeded = Boolean(Object.keys(resources).length || Object.keys(origins).length);
   const configFile = path.join(options.source, configName);
   const config = bindLibraryReferences(configFile, await readFile(configFile, "utf8"));
   const parsed = ts.createSourceFile(configName, config, ts.ScriptTarget.Latest, true);
@@ -75,29 +91,37 @@ export async function copyNativeVite(options: GiveOptions, destination: string, 
   const original = "vite.original" + path.extname(configName);
   await writeFile(path.join(destination, original), copiedConfig);
   // Overwrite the copied entry config with an adapter; sourceRoot remains untouched.
-  await writeFile(path.join(destination, configName), options.noPublic ? `import sourceConfig from "./${original}";
-import { compactConfig } from "./vitality-inline.ts";
-export default async env => compactConfig(await (typeof sourceConfig === "function" ? sourceConfig(env) : sourceConfig), ${JSON.stringify(options.base)});
+  await writeFile(path.join(destination, configName), options.noPublic || layoutNeeded ? `import sourceConfig from "./${original}";
+import { ${options.noPublic ? "compactConfig" : "publicConfig"} as configure } from "./vitality-inline.ts";
+import { fileURLToPath } from "node:url";
+export default async env => configure(await (typeof sourceConfig === "function" ? sourceConfig(env) : sourceConfig), ${JSON.stringify(options.base)}, {
+  root: fileURLToPath(new URL(".", import.meta.url)), resources: ${JSON.stringify(resources)}, origins: ${JSON.stringify(origins)},
+});
 ` : `import sourceConfig from "./${original}";
 import { fileURLToPath } from "node:url";
+const engineAsset = ${engineAsset.toString()};
 export default async env => {
   const config = await (typeof sourceConfig === "function" ? sourceConfig(env) : sourceConfig);
-  return { ...config, base: ${JSON.stringify(options.base)}, build: {
-    ...config.build, outDir: fileURLToPath(new URL("./dist", import.meta.url)), emptyOutDir: true, assetsInlineLimit: Number.POSITIVE_INFINITY,
+  return { ...config, base: ${JSON.stringify(options.base)}, assetsInclude: [...${JSON.stringify(binaryAssetGlobs)}, ...[config.assetsInclude ?? []].flat()], build: {
+    ...config.build, outDir: fileURLToPath(new URL("./dist", import.meta.url)), emptyOutDir: true,
+    assetsInlineLimit: file => !engineAsset(file),
   } };
 };
 `);
-  if (options.noPublic) {
+  if (options.noPublic || layoutNeeded) {
     const helper = await readFile(new URL("./native-vite-plugin.js", import.meta.url), "utf8");
-    await writeFile(path.join(destination, "vitality-inline.ts"), helper.replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, ""));
+    await writeFile(path.join(destination, "vitality-inline.ts"), helper.replace('"./asset-policy.js"', '"./vitality-asset-policy.ts"').replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, ""));
+    await writeFile(path.join(destination, "vitality-asset-policy.ts"), (await readFile(new URL("./asset-policy.js", import.meta.url), "utf8")).replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, ""));
   }
   await writeWrapperPackage(options.source, destination, options.base, true, 0, options.sourceEntry);
   const pkgPath = path.join(destination, "package.json");
   const pkg = JSON.parse(await readFile(pkgPath, "utf8"));
-  const originalPackage = JSON.parse(await readFile(path.join(options.source, "package.json"), "utf8"));
+  let originalPackage: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> } = {};
+  try { originalPackage = JSON.parse(await readFile(path.join(options.source, "package.json"), "utf8")); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   // Match the source's Vite major/plugins instead of downgrading its toolchain.
   pkg.devDependencies.vite = originalPackage.devDependencies?.vite ?? originalPackage.dependencies?.vite ?? pkg.devDependencies.vite;
-  if (options.noPublic) {
+  if (options.noPublic || layoutNeeded) {
     pkg.devDependencies["typescript-parser"] = "npm:typescript@5.9.3";
     pkg.devDependencies.tinyglobby = "^0.2.15";
   }

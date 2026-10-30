@@ -57,8 +57,8 @@ async function resolveGiveOptions(parsed: CliOptions): Promise<GiveOptions> {
       : false);
     if (noPublic && parsed.inlineAssets === false) throw new UsageError("--no-public requires inlining; remove --no-inline");
     if (noPublic) inlineAssets = true;
-    const { detectLibraryOutputs } = await import("./composition.js");
-    const libraryOutputs = detectLibraryOutputs(source);
+    const { detectLibraryPlan } = await import("./composition.js");
+    const library = detectLibraryPlan(source);
     return {
       source,
       siteRoot: entry.root,
@@ -70,7 +70,8 @@ async function resolveGiveOptions(parsed: CliOptions): Promise<GiveOptions> {
       noPublic,
       dryRun: parsed.dryRun,
       ...(composition ? { composition } : {}),
-      ...(libraryOutputs.size ? { libraryOutputs } : {}),
+      ...(library.outputs.size ? { libraryOutputs: library.outputs } : {}),
+      ...(library.files.size ? { libraryFiles: library.files } : {}),
     };
   } finally {
     prompt?.close();

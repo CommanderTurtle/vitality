@@ -21,7 +21,7 @@ async function inventory(root: string): Promise<string[]> {
   return result.sort();
 }
 
-export async function embedPublicFiles(root: string, base: string, pages: string[], sourceRoot: string, plan?: Composition): Promise<void> {
+export async function embedPublicFiles(root: string, base: string, pages: string[], sourceRoot: string, plan?: Composition, moduleOrigins?: ReadonlyMap<string, string>): Promise<void> {
   const publicFiles = await inventory(path.join(root, "public"));
   const modules = new Map<string, string>();
   const dynamicModules = new Set<string>();
@@ -49,6 +49,7 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     if (nonRuntime.test(file)) continue;
     if (moduleFile.test(file)) {
       modules.set(file, dest);
+      modules.set(dest, dest);
       const jsName = file.replace(/\.mts$/, ".mjs").replace(/\.tsx$/, ".jsx").replace(/\.ts$/, ".js");
       if (!modules.has(jsName)) modules.set(jsName, dest);
       // An already-built site can discover modules through JSON/API manifests,
@@ -67,6 +68,11 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     modules.set(name, "src/app/" + source);
     dynamicModules.add(name);
     originalNames.set("src/app/" + source, name);
+  }
+  for (const [file, name] of moduleOrigins ?? []) {
+    if (!modules.has(name)) modules.set(name, file);
+    dynamicModules.add(name);
+    originalNames.set(file, name);
   }
   const resolve = (value: string, from = "index.html") => {
     if (/^(?:[a-z][\w+.-]*:|\/\/|#|data:)/i.test(value)) return undefined;
@@ -143,7 +149,7 @@ export async function embedPublicFiles(root: string, base: string, pages: string
       if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && ["URL", "Worker", "SharedWorker"].includes(node.expression.text)) {
         const arg = node.arguments?.[0];
         if (arg && ts.isStringLiteralLike(arg)) {
-          const name = resolve(arg.text, origin);
+          const name = resolve(arg.text, file) ?? resolve(arg.text, origin);
           if (name && modules.has(name)) {
             scriptURLs[name] = modules.get(name)!;
             if (node.expression.text === "URL") {
@@ -160,7 +166,7 @@ export async function embedPublicFiles(root: string, base: string, pages: string
         const arg = node.arguments[0];
         if (!arg) return;
         if (ts.isStringLiteralLike(arg)) {
-          const name = resolve(arg.text, origin);
+          const name = resolve(arg.text, file) ?? resolve(arg.text, origin);
           if (name && modules.has(name)) edit(arg, JSON.stringify(relativeModule(name)));
           // Ordinary source imports remain ordinary imports for Vite to resolve.
           return;
@@ -169,7 +175,7 @@ export async function embedPublicFiles(root: string, base: string, pages: string
         return;
       }
       if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteralLike(node.moduleSpecifier)) {
-        const name = resolve(node.moduleSpecifier.text, origin);
+        const name = resolve(node.moduleSpecifier.text, file) ?? resolve(node.moduleSpecifier.text, origin);
         if (name && modules.has(name)) edit(node.moduleSpecifier, JSON.stringify(relativeModule(name)));
         return;
       }
@@ -190,7 +196,7 @@ export async function embedPublicFiles(root: string, base: string, pages: string
           edit(node, `new URL(${JSON.stringify(page)}, globalThis.__vitalityEmbedded.root).href`);
           return;
         }
-        const name = resolve(node.text, origin);
+        const name = resolve(node.text, file) ?? resolve(node.text, origin);
         if (name && Object.hasOwn(assets, name)) edit(node, /\.json$/i.test(name)
           ? `new URL(${JSON.stringify(name)}, globalThis.__vitalityEmbedded.root).href`
           : `globalThis.__vitalityEmbedded.asset(${JSON.stringify(name)})`);
@@ -285,21 +291,25 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     await writeFile(path.join(root, name), page);
     extraPages.push({ name, entry: "src/" + shim + ".ts", assets: dependencies.assets, scripts: dependencies.scripts });
   }
-  const plugin = (await readFile(new URL("./embedded-assets-plugin.js", import.meta.url), "utf8")).replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, "");
+  const plugin = (await readFile(new URL("./embedded-assets-plugin.js", import.meta.url), "utf8"))
+    .replace('"./asset-policy.js"', '"./vitality-asset-policy.ts"').replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, "");
   await writeFile(path.join(root, "inline-assets.ts"), plugin);
+  await writeFile(path.join(root, "vitality-asset-policy.ts"), (await readFile(new URL("./asset-policy.js", import.meta.url), "utf8")).replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, ""));
   await writeFile(path.join(root, "vite.config.ts"), `import { defineConfig } from "vite";
 import { fileURLToPath } from "node:url";
 import { embeddedAssets } from "./inline-assets.ts";
+import { engineAsset, engineFileName } from "./vitality-asset-policy.ts";
 const root = fileURLToPath(new URL(".", import.meta.url));
 export default defineConfig({
   root, base: ${JSON.stringify(base)}, publicDir: false,
   plugins: [embeddedAssets(root, ${JSON.stringify(extraPages)})],
   build: {
     outDir: "dist", emptyOutDir: true, target: "esnext", cssCodeSplit: false,
-    assetsInlineLimit: Number.POSITIVE_INFINITY, modulePreload: false,
+    assetsInlineLimit: file => !engineAsset(file), modulePreload: false,
     rolldownOptions: { input: "index.html",
       output: { codeSplitting: false, entryFileNames: "assets/index.js",
-      assetFileNames: asset => asset.names.some(name => name.endsWith(".css")) ? "assets/index.css" : "assets/[name][extname]" } },
+      assetFileNames: asset => asset.names.some(name => name.endsWith(".css")) ? "assets/index.css"
+        : engineAsset(asset.names[0] ?? "") ? engineFileName(asset.names[0], asset.source) : "assets/[name][extname]" } },
   },
 });
 `);
@@ -346,7 +356,8 @@ function key(value: string | URL, from = root.href) {
   try { url = new URL(String(value), /^(?:blob|data):/.test(from) ? root.href : from); }
   catch { return undefined; }
   if (url.origin !== root.origin) return undefined;
-  return decodeURIComponent(url.pathname.startsWith(root.pathname) ? url.pathname.slice(root.pathname.length) : url.pathname.replace(/^\\//, ""));
+  try { return decodeURIComponent(url.pathname.startsWith(root.pathname) ? url.pathname.slice(root.pathname.length) : url.pathname.replace(/^\\//, "")); }
+  catch { return undefined; }
 }
 const realFetch = globalThis.fetch.bind(globalThis);
 const scriptURLs = new Map<string, string>();

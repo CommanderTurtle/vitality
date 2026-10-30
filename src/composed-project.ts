@@ -4,6 +4,8 @@ import type { Composition } from "./composition.js";
 import type { CopySummary } from "./copy.js";
 import { containsPath } from "./paths.js";
 import { UsageError } from "./args.js";
+import { binaryAssetGlobs, engineAsset } from "./asset-policy.js";
+import { libraryModuleOrigins } from "./copy.js";
 
 const web = (file: string) => file.split(path.sep).join("/");
 const quotes = /(["'])([^"'\r\n]+)\1/g;
@@ -26,7 +28,9 @@ export async function copyComposition(root: string, wrapper: string, plan: Compo
   };
   const resolveImport = async (file: string, value: string): Promise<string | undefined> => {
     if (!value.startsWith(".")) return undefined;
-    const direct = path.resolve(path.dirname(file), value);
+    let clean: string;
+    try { clean = decodeURIComponent(value.split(/[?#]/)[0]!); } catch { return undefined; }
+    const direct = path.resolve(path.dirname(file), clean);
     if (!containsPath(root, direct)) return undefined;
     const candidates = [direct, direct + ".ts", direct + ".tsx", direct + ".js", path.join(direct, "index.ts")];
     if (direct.endsWith(".js")) candidates.push(direct.slice(0, -3) + ".ts");
@@ -42,12 +46,15 @@ export async function copyComposition(root: string, wrapper: string, plan: Compo
     if (!/\.(?:[cm]?[jt]sx?|css|json)$/i.test(file)) return;
     const text = await readFile(file, "utf8");
     sourceText.set(file, text);
-    for (const match of text.matchAll(imports)) {
+    // The source graph includes URL-addressed workers and binaries too, not
+    // only import statements. Otherwise the declared output loses sidecars.
+    for (const match of text.matchAll(quotes)) {
       const found = await resolveImport(file, match[2]!);
       if (found) await visit(found);
     }
   };
   for (const file of modules.values()) await visit(file);
+  const origins = await libraryModuleOrigins(modules, [...sourceFiles.keys()], root);
   for (const [file, destination] of sourceFiles) {
     let text = sourceText.get(file);
     if (text === undefined) { await write(destination, await readFile(file)); continue; }
@@ -57,7 +64,8 @@ export async function copyComposition(root: string, wrapper: string, plan: Compo
       const target = found ? sourceFiles.get(found) : undefined;
       if (target) {
         const relative = path.posix.relative(path.posix.dirname(destination), target);
-        replacements.set(match[2]!, relative.startsWith(".") ? relative : "./" + relative);
+        const suffix = match[2]!.slice(match[2]!.search(/[?#]/) < 0 ? match[2]!.length : match[2]!.search(/[?#]/));
+        replacements.set(match[2]!, (relative.startsWith(".") ? relative : "./" + relative) + suffix);
       }
     }
     const outputName = [...modules].find(([, source]) => source === file)?.[0];
@@ -141,12 +149,14 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
+const engineAsset = ${engineAsset.toString()};
 const input = ${JSON.stringify(input, null, 2)};
 const routes: Record<string, string> = ${JSON.stringify(routes, null, 2)};
 const moduleOutputs: Record<string, string> = ${JSON.stringify(moduleOutputs, null, 2)};
 const base = ${JSON.stringify(base)};
 export default defineConfig({
   root, base, publicDir: "public",
+  assetsInclude: ${JSON.stringify(binaryAssetGlobs)},
   plugins: [{ name: "source-module-routes", configureServer(server) {
     server.middlewares.use((req, _res, next) => {
       const prefix = base.startsWith("/") ? base : "/";
@@ -158,7 +168,7 @@ export default defineConfig({
   } }],
   build: {
     outDir: "dist", emptyOutDir: true, target: "esnext", modulePreload: false,
-    ${inline ? "assetsInlineLimit: Number.POSITIVE_INFINITY," : "// assetsInlineLimit: Vite default,"}
+    assetsInlineLimit: file => engineAsset(file) ? false : ${inline ? "true" : "undefined"},
     rolldownOptions: {
       input: Object.fromEntries(Object.entries(input).map(([name, file]) => [name, path.resolve(root, file)])),
       external: ${JSON.stringify([...external])},
@@ -168,5 +178,6 @@ export default defineConfig({
   },
 });
 `;
-  return { copiedFiles, copiedBytes, excludedEntries: 0, skippedLinks: 0, pages: [], config };
+  return { copiedFiles, copiedBytes, excludedEntries: 0, skippedLinks: 0, pages: [], config,
+    moduleOrigins: new Map([...origins].map(([file, name]) => [sourceFiles.get(file)!, name])) };
 }

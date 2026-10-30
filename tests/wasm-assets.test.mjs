@@ -5,10 +5,20 @@ import os from "node:os";
 import path from "node:path";
 import { embeddedAssets, normalizeInlineScript } from "../dist/embedded-assets-plugin.js";
 import { createHash } from "node:crypto";
-import { compactConfig } from "../dist/native-vite-plugin.js";
+import { compactConfig, viteStaticCopy } from "../dist/native-vite-plugin.js";
+import { binaryFile, engineAsset, engineFileName } from "../dist/asset-policy.js";
 
 const call = (hook, context, ...args) => (typeof hook === "function" ? hook : hook.handler).call(context, ...args);
 const wasm = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
+
+test('binary policy handles URL suffixes without treating path punctuation as a URL', () => {
+  for (const name of ['C:/project # 100%/file.tar?url', '/project/hash#name/module.WASM?url#x', '/project/notes#1/file.gz']) {
+    assert.ok(engineAsset(name));
+    assert.ok(binaryFile(name).endsWith(name.includes('WASM') ? '.WASM' : name.includes('.tar') ? '.tar' : '.gz'));
+  }
+  assert.equal(binaryFile('/project/directory.tar#1/main.js'), undefined);
+  assert.match(engineFileName('model.tar', Buffer.from([0,255])), /^assets\/model-[a-f0-9]{16}\.tar$/);
+});
 
 test("inline CSP hashes survive HTML newline normalization and trailing-text trimming", () => {
   const input = '// helper\r\nparent.postMessage({type:"ready"},location.origin);\r\n';
@@ -18,6 +28,45 @@ test("inline CSP hashes survive HTML newline normalization and trailing-text tri
   assert.notEqual(digest(input.replace(/\r\n/g, "\n")), digest(code));
   assert.equal(digest(code), digest(code.trimEnd()));
   assert.equal(normalizeInlineScript('const end="</script>";\n'), 'const end="<\\/script>";');
+});
+
+test("native forced-inline engines are outlined at every size, including archives", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'vitality-engine-sizes-'));
+  try {
+    const config = compactConfig({ root, publicDir: false }, '/site/');
+    const ctx = context(), plugin = config.plugins[0], worker = config.worker.plugins().at(-1);
+    await call(plugin.buildStart, ctx);
+    for (const [type, extension] of [['wasm', 'wasm'], ['gzip', 'gz'], ['x-tar', 'tar']]) {
+      const bytes = Buffer.from([0, 255, 1]);
+      const output = call(worker.renderChunk, ctx, `export const file="data:application/${type};base64,${bytes.toString('base64')}";`, {fileName:'worker.js'});
+      assert.ok(output.code.includes('__vitalityNative.asset('));
+      assert.ok(!output.code.includes('data:application/'));
+    }
+    const entry = {type:'chunk',isEntry:true,code:'const assets="__VITALITY_NATIVE_ASSETS__";'};
+    call(plugin.generateBundle, ctx, {}, {'assets/index-abcd.js':entry});
+    assert.deepEqual(ctx.emitted.map(item => path.extname(item.fileName)).sort(), ['.gz','.tar','.wasm']);
+    for (const item of ctx.emitted) assert.deepEqual(item.source, Buffer.from([0,255,1]));
+  } finally { await rm(root, {recursive:true,force:true}); }
+});
+
+test("static-copy resource ownership stays with its config", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'vitality-copy-ownership-'));
+  try {
+    await writeFile(path.join(root, 'first.tar'), 'first');
+    await writeFile(path.join(root, 'second.gz'), 'second');
+    const first = viteStaticCopy({targets:[{src:'first.tar',dest:'models'}]});
+    const second = viteStaticCopy({targets:[{src:'second.gz',dest:'languages'}]});
+    for (const [selected, expected, excluded] of [[first,'.tar','.gz'],[second,'.gz','.tar']]) {
+      const config = compactConfig({root,publicDir:false,plugins:[Promise.resolve([selected])]}, '/site/');
+      const ctx = context(), plugin = config.plugins[0];
+      await call(plugin.buildStart, ctx);
+      const entry = {type:'chunk',isEntry:true,code:'const assets="__VITALITY_NATIVE_ASSETS__";'};
+      call(plugin.generateBundle, ctx, {}, {'assets/index-abcd.js':entry});
+      assert.equal(ctx.emitted.length, 1);
+      assert.equal(path.extname(ctx.emitted[0].fileName), expected);
+      assert.ok(!entry.code.includes(excluded));
+    }
+  } finally { await rm(root, {recursive:true,force:true}); }
 });
 function context() {
   const emitted = [];
