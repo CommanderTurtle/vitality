@@ -15,6 +15,7 @@ export interface CliOptions {
 
 export interface GiveOptions {
   composition?: Composition;
+  libraryOutputs?: ReadonlyMap<string, string>;
   source: string;
   siteRoot: string;
   sourceIndex: string;

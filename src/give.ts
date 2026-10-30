@@ -28,6 +28,8 @@ export async function give(options: GiveOptions): Promise<ScaffoldReport> {
       options.output,
       temporary,
       options.inlineAssets && !options.noPublic ? options.base : undefined,
+      options.libraryOutputs,
+      options.source,
     );
     await mkdir(path.join(temporary, "src"), { recursive: true });
     await Promise.all([

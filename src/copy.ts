@@ -138,6 +138,7 @@ function resolveReference(
   value: string,
   known: Set<string>,
   sourceRoot: string,
+  aliases?: ReadonlyMap<string, string>,
 ): string | undefined {
   if (isRemoteReference(value)) return undefined;
   const { pathname } = referenceParts(value);
@@ -152,10 +153,17 @@ function resolveReference(
       path.join(direct, "index.js"), path.join(direct, "index.jsx"), path.join(direct, "index.tsx"),
     ]
     : [direct];
+  if (aliases?.size) {
+    if (direct.endsWith(".js")) candidates.push(direct.slice(0, -3) + ".ts", direct.slice(0, -3) + ".tsx");
+    else if (direct.endsWith(".mjs")) candidates.push(direct.slice(0, -4) + ".mts");
+    else if (direct.endsWith(".cjs")) candidates.push(direct.slice(0, -4) + ".cts");
+  }
+  const fallback = path.resolve(sourceRoot, pathname.replace(/^\//, ''));
   return candidates.find((candidate) => known.has(candidate))
     // Built runtimes also resolve literal manifest/helper URLs against a
     // computed deployment root rather than the current chunk's directory.
-    ?? [path.resolve(sourceRoot, pathname.replace(/^\//, ''))].find(candidate => known.has(candidate));
+    ?? [fallback].find(candidate => known.has(candidate))
+    ?? (aliases?.size ? [...candidates, fallback].map(candidate => aliases.get(candidate)).find(candidate => candidate !== undefined && known.has(candidate)) : undefined);
 }
 
 async function inventory(source: string, output: string, temporary: string): Promise<SourceInventory> {
@@ -212,13 +220,14 @@ function localModuleSources(
   htmlFile: string,
   known: Set<string>,
   sourceRoot: string,
+  aliases?: ReadonlyMap<string, string>,
 ): string[] {
   const found: string[] = [];
   for (const match of html.matchAll(moduleScriptPattern)) {
     const before = match[1] ?? "";
     const after = match[4] ?? "";
     if (!/\btype\s*=\s*(["'])module\1/iu.test(`${before} ${after}`)) continue;
-    const resolved = resolveReference(htmlFile, match[3] ?? "", known, sourceRoot);
+    const resolved = resolveReference(htmlFile, match[3] ?? "", known, sourceRoot, aliases);
     if (resolved !== undefined) found.push(resolved);
   }
   return found;
@@ -226,6 +235,7 @@ function localModuleSources(
 
 async function discoverReachable(
   files: string[], sourceIndex: string, sourceRoot: string,
+  aliases?: ReadonlyMap<string, string>,
 ): Promise<Set<string>> {
   const known = new Set(files);
   const reachable = new Set<string>([sourceIndex]);
@@ -238,7 +248,7 @@ async function discoverReachable(
       const value = match[2] ?? "";
       const { pathname } = referenceParts(value);
       if (!pathname.startsWith(".") && !pathname.includes("/") && path.extname(pathname) === "") continue;
-      const resolved = resolveReference(current, value, known, sourceRoot);
+      const resolved = resolveReference(current, value, known, sourceRoot, aliases);
       if (resolved === undefined || reachable.has(resolved)) continue;
       reachable.add(resolved);
       pending.push(resolved);
@@ -249,12 +259,13 @@ async function discoverReachable(
 
 async function discoverModules(
   files: string[], reachable: Set<string>, sourceRoot: string,
+  aliases?: ReadonlyMap<string, string>,
 ): Promise<Set<string>> {
   const known = new Set(files);
   const modules = new Set<string>();
   for (const file of files.filter((candidate) => reachable.has(candidate) && /\.html?$/iu.test(candidate))) {
     const html = await readFile(file, "utf8");
-    for (const module of localModuleSources(html, file, known, sourceRoot)) modules.add(module);
+    for (const module of localModuleSources(html, file, known, sourceRoot, aliases)) modules.add(module);
   }
 
   const pending = [...modules];
@@ -263,7 +274,7 @@ async function discoverModules(
     if (current === undefined || !/\.(?:[cm]?[jt]sx?)$/iu.test(current)) continue;
     const code = await readFile(current, "utf8");
     for (const match of code.matchAll(importPattern)) {
-      const resolved = resolveReference(current, match[2] ?? "", known, sourceRoot);
+      const resolved = resolveReference(current, match[2] ?? "", known, sourceRoot, aliases);
       if (resolved === undefined || modules.has(resolved) || !/\.(?:[cm]?[jt]sx?)$/iu.test(resolved)) continue;
       modules.add(resolved);
       pending.push(resolved);
@@ -274,6 +285,7 @@ async function discoverModules(
 
 async function discoverClassicScripts(
   files: string[], reachable: Set<string>, sourceRoot: string,
+  aliases?: ReadonlyMap<string, string>,
 ): Promise<Set<string>> {
   const known = new Set(files);
   const scripts = new Set<string>();
@@ -283,7 +295,7 @@ async function discoverClassicScripts(
       const before = match[1] ?? "";
       const after = match[4] ?? "";
       if (/\btype\s*=\s*(["'])module\1/iu.test(`${before} ${after}`)) continue;
-      const resolved = resolveReference(file, match[3] ?? "", known, sourceRoot);
+      const resolved = resolveReference(file, match[3] ?? "", known, sourceRoot, aliases);
       if (resolved !== undefined) scripts.add(resolved);
     }
   }
@@ -306,6 +318,7 @@ function jsonStringReferences(value: unknown, found: string[]): void {
 
 async function localJsonReferences(
   file: string, known: Set<string>, sourceRoot: string,
+  aliases?: ReadonlyMap<string, string>,
 ): Promise<string[]> {
   let parsed: unknown;
   try {
@@ -319,7 +332,7 @@ async function localJsonReferences(
   for (const value of values) {
     const { pathname } = referenceParts(value);
     if (!pathname.startsWith(".") && !pathname.includes("/") && path.extname(pathname) === "") continue;
-    const resolved = resolveReference(file, value, known, sourceRoot);
+    const resolved = resolveReference(file, value, known, sourceRoot, aliases);
     if (resolved !== undefined) found.add(resolved);
   }
   return [...found];
@@ -327,11 +340,12 @@ async function localJsonReferences(
 
 async function discoverPublicJson(
   files: string[], reachable: Set<string>, sourceRoot: string,
+  aliases?: ReadonlyMap<string, string>,
 ): Promise<Set<string>> {
   const known = new Set(files);
   const references = new Map<string, string[]>();
   for (const file of files.filter((candidate) => reachable.has(candidate) && candidate.endsWith(".json"))) {
-    references.set(file, await localJsonReferences(file, known, sourceRoot));
+    references.set(file, await localJsonReferences(file, known, sourceRoot, aliases));
   }
   const publicJson = new Set<string>();
   const pending: string[] = [];
@@ -360,8 +374,9 @@ function destinationFor(
   modules: Set<string>,
   reachable: Set<string>,
   publicFiles: Set<string>,
+  logicalName = path.relative(source, file),
 ): string {
-  let relative = path.relative(source, file);
+  let relative = logicalName;
   if (publicFiles.has(file)) return path.join(wrapperRoot, "public", relative);
   if (/\.html?$/iu.test(relative)) {
     if (!reachable.has(file)) throw new Error(`unroutable HTML has no destination: ${relative}`);
@@ -384,12 +399,13 @@ function rewrittenReference(
   destinations: Map<string, string>,
   sourceRoot: string,
   publicRoot: string,
+  aliases?: ReadonlyMap<string, string>,
 ): string | undefined {
   const { pathname, suffix } = referenceParts(value);
   if (!pathname.startsWith(".") && !pathname.includes("/") && path.extname(pathname) === "") {
     return undefined;
   }
-  const target = resolveReference(sourceFile, value, known, sourceRoot);
+  const target = resolveReference(sourceFile, value, known, sourceRoot, aliases);
   if (target === undefined) return undefined;
   const destination = destinations.get(target);
   if (destination === undefined) return undefined;
@@ -411,6 +427,7 @@ function rewriteLocalReferences(
   destinations: Map<string, string>,
   sourceRoot: string,
   publicRoot: string,
+  aliases?: ReadonlyMap<string, string>,
 ): string {
   const moduleReferences = new Set([...content.matchAll(importPattern)].map(match =>
     match.index! + match[0].length - match[2]!.length - 2));
@@ -418,7 +435,7 @@ function rewriteLocalReferences(
     // Bare dot markers are data unless used as an import/export specifier.
     if ((value === "." || value === "..") && !moduleReferences.has(offset)) return whole;
     const rewritten = rewrittenReference(
-      value, sourceFile, destinationFile, known, destinations, sourceRoot, publicRoot,
+      value, sourceFile, destinationFile, known, destinations, sourceRoot, publicRoot, aliases,
     );
     return rewritten === undefined ? whole : `${quote}${rewritten}${quote}`;
   });
@@ -428,7 +445,7 @@ function rewriteLocalReferences(
       (whole, prefix: string, value: string, suffix: string) => {
         const rewritten = rewrittenReference(
           value, sourceFile, destinationFile, known, destinations, sourceRoot,
-          publicRoot,
+          publicRoot, aliases,
         );
         return rewritten === undefined ? whole : `${prefix}${rewritten}${suffix}`;
       },
@@ -438,7 +455,7 @@ function rewriteLocalReferences(
     rewrittenContent = rewrittenContent.replace(
       importMetaUrlPattern,
       (whole, _quote: string, value: string) => {
-        const target = resolveReference(sourceFile, value, known, sourceRoot);
+        const target = resolveReference(sourceFile, value, known, sourceRoot, aliases);
         const destination = target === undefined ? undefined : destinations.get(target);
         if (destination === undefined || !containsPath(publicRoot, destination)) return whole;
         const relative = webPath(path.relative(publicRoot, destination));
@@ -461,12 +478,13 @@ function rootEntry(
   known: Set<string>,
   destinations: Map<string, string>,
   publicRoot: string,
+  aliases?: ReadonlyMap<string, string>,
 ): { html: string; main: string } {
   const mainFile = path.join(path.dirname(wrapperIndex), "src", "main.ts");
   const imports: string[] = [];
   let html = original.replace(styleLinkPattern, (whole, before: string, _quote: string, href: string, after: string) => {
     if (!/\brel\s*=\s*(["'])stylesheet\1/iu.test(`${before} ${after}`)) return whole;
-    const target = resolveReference(sourceIndex, href, known, sourceRoot);
+    const target = resolveReference(sourceIndex, href, known, sourceRoot, aliases);
     const destination = target === undefined ? undefined : destinations.get(target);
     if (destination === undefined) return whole;
     if (containsPath(publicRoot, destination)) return whole;
@@ -478,7 +496,7 @@ function rootEntry(
 
   html = html.replace(moduleScriptPattern, (whole, before: string, _quote: string, src: string, after: string) => {
     if (!/\btype\s*=\s*(["'])module\1/iu.test(`${before} ${after}`)) return whole;
-    const target = resolveReference(sourceIndex, src, known, sourceRoot);
+    const target = resolveReference(sourceIndex, src, known, sourceRoot, aliases);
     const destination = target === undefined ? undefined : destinations.get(target);
     if (destination === undefined) return whole;
     if (containsPath(publicRoot, destination)) {
@@ -499,7 +517,7 @@ function rootEntry(
     return "";
   });
   html = rewriteLocalReferences(
-    html, sourceIndex, wrapperIndex, known, destinations, sourceRoot, publicRoot,
+    html, sourceIndex, wrapperIndex, known, destinations, sourceRoot, publicRoot, aliases,
   );
   const entry = '    <script type="module" src="/src/main.ts"></script>\n';
   html = /<\/body\s*>/iu.test(html)
@@ -526,19 +544,35 @@ export async function copyProject(
   output: string,
   temporary: string,
   runtimeBase?: string,
+  libraryOutputs?: ReadonlyMap<string, string>,
+  projectRoot = sourceRoot,
 ): Promise<CopySummary> {
   const found = await inventory(sourceRoot, output, temporary);
+  const aliases = new Map([...libraryOutputs ?? []].map(([name, file]) => [path.resolve(sourceRoot, name), file]));
+  const libraryDirectories = new Set([...aliases.values()].filter(file => !containsPath(sourceRoot, file)).map(file => path.dirname(file)));
+  for (const directory of libraryDirectories) {
+    if (!containsPath(projectRoot, directory)) throw new UsageError("Library source leaves the project: " + directory);
+    const additional = await inventory(directory, output, temporary);
+    found.files.push(...additional.files);
+    found.excludedEntries += additional.excludedEntries;
+    found.skippedLinks += additional.skippedLinks;
+  }
+  found.files = [...new Set(found.files)].sort();
+  let libraryPrefix = "__vitality_sources__";
+  while (found.files.some(file => containsPath(path.join(sourceRoot, libraryPrefix), file))) libraryPrefix += "_";
+  const sourceNames = new Map(found.files.map(file => [file, containsPath(sourceRoot, file)
+    ? webPath(path.relative(sourceRoot, file)) : libraryPrefix + "/" + webPath(path.relative(projectRoot, file))]));
   const known = new Set(found.files);
-  const reachable = await discoverReachable(found.files, sourceIndex, sourceRoot);
+  const reachable = await discoverReachable(found.files, sourceIndex, sourceRoot, aliases);
   const appRoot = path.join(temporary, "src", "app");
   const publicRoot = path.join(temporary, "public");
-  const publicJson = await discoverPublicJson(found.files, reachable, sourceRoot);
-  const classicScripts = await discoverClassicScripts(found.files, reachable, sourceRoot);
+  const publicJson = await discoverPublicJson(found.files, reachable, sourceRoot, aliases);
+  const classicScripts = await discoverClassicScripts(found.files, reachable, sourceRoot, aliases);
   const publicFiles = new Set([...publicJson, ...classicScripts]);
   const runtime = runtimeBase === undefined ? undefined
-    : await publicRuntime(found.files, reachable, sourceRoot, runtimeBase, publicFiles);
+    : await publicRuntime(found.files, reachable, sourceRoot, runtimeBase, publicFiles, sourceNames);
   if (runtime) for (const file of runtime.files) publicFiles.add(file);
-  const modules = await discoverModules(found.files, reachable, sourceRoot);
+  const modules = await discoverModules(found.files, reachable, sourceRoot, aliases);
   for (const file of found.files) {
     if (path.dirname(file) === sourceRoot && deploymentPublicNames.has(path.basename(file))) {
       publicFiles.add(file);
@@ -550,7 +584,7 @@ export async function copyProject(
     if (file !== sourceIndex) {
       destinations.set(
         file,
-        destinationFor(sourceRoot, file, temporary, appRoot, modules, reachable, publicFiles),
+        destinationFor(sourceRoot, file, temporary, appRoot, modules, reachable, publicFiles, sourceNames.get(file)),
       );
     }
   }
@@ -569,7 +603,7 @@ export async function copyProject(
     } else if (isTextFile(file)) {
       const sourceText = await readFile(file, "utf8");
       const rewritten = rewriteLocalReferences(
-        runtime ? runtime.rewrite(sourceText, file) : sourceText, file, destination, known, destinations, sourceRoot, publicRoot,
+        runtime ? runtime.rewrite(sourceText, file) : sourceText, file, destination, known, destinations, sourceRoot, publicRoot, aliases,
       );
       await writeFile(destination, rewritten, "utf8");
     } else {
@@ -588,6 +622,7 @@ export async function copyProject(
     known,
     destinations,
     publicRoot,
+    aliases,
   );
   await Promise.all([
     writeFile(wrapperIndex, entry.html, "utf8"),

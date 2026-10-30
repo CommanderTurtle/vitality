@@ -15,6 +15,7 @@ interface Scope { values: Map<string, Value>; parent?: Scope }
 const callable = Symbol("static-operation");
 const fileHandle = Symbol("source-file");
 const returned = Symbol("return");
+const deferred = Symbol("path-expression");
 const native = (fn: (...args: Value[]) => Value) => ({ [callable]: fn });
 
 // A small, closed expression reader: no eval, module execution, subprocesses, compilation,
@@ -22,6 +23,7 @@ const native = (fn: (...args: Value[]) => Value) => ({ [callable]: fn });
 class Reader {
   readonly files = new Map<string, ComposedFile>();
   private readonly loaded = new Map<string, Scope>();
+  private readonly pathScopes = new Map<string, Scope>();
   private budget = 100_000;
   constructor(private readonly root: string) {}
   private safe(file: string): string {
@@ -45,7 +47,15 @@ class Reader {
     return url;
   }
   private lookup(scope: Scope, key: string): Value {
-    if (scope.values.has(key)) return scope.values.get(key);
+    if (scope.values.has(key)) {
+      const value = scope.values.get(key);
+      if (!value?.[deferred]) return value;
+      if (value.resolving) throw new UsageError("Circular source path expression: " + key);
+      value.resolving = true;
+      const resolved = value[deferred]();
+      scope.values.set(key, resolved);
+      return resolved;
+    }
     if (scope.parent) return this.lookup(scope.parent, key);
     if (key === "undefined") return undefined;
     throw new UsageError("Unresolved source expression: " + key);
@@ -214,6 +224,107 @@ class Reader {
   private statements(nodes: ts.NodeArray<ts.Statement>, scope: Scope): Value {
     for (const node of nodes) { const result = this.statement(node, scope); if (result) return result; }
   }
+  // Read only declarations needed by a library's entry/name fields. Preparation,
+  // downloads, plugin callbacks and all other recipe statements stay unevaluated.
+  private pathScope(file: string): Scope {
+    this.safe(file);
+    const cached = this.pathScopes.get(file);
+    if (cached) return cached;
+    const scope: Scope = { values: new Map() };
+    this.pathScopes.set(file, scope);
+    const paths = { join: native((...items) => path.join(...items)), resolve: native((...items) => path.resolve(...items)), dirname: native(file => path.dirname(file)) };
+    const urls = { fileURLToPath: native(url => this.safe(fileURLToPath(this.fileURL(url)))) };
+    const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+    for (const node of source.statements) {
+      if (ts.isVariableStatement(node)) {
+        for (const item of node.declarationList.declarations) if (ts.isIdentifier(item.name) && item.initializer) {
+          scope.values.set(item.name.text, { [deferred]: () => this.expression(item.initializer!, scope) });
+        }
+      } else if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+        const specifier = node.moduleSpecifier.text;
+        const bindings = node.importClause?.namedBindings;
+        if (!bindings || !ts.isNamedImports(bindings)) continue;
+        for (const item of bindings.elements) {
+          const key = item.propertyName?.text ?? item.name.text;
+          scope.values.set(item.name.text, { [deferred]: () => {
+            if (specifier === "node:path") return this.property(paths, key);
+            if (specifier === "node:url") return this.property(urls, key);
+            if (specifier.startsWith(".")) {
+              const target = this.safe(path.resolve(path.dirname(file), specifier));
+              const resolved = [target, target + ".ts", target + ".js", target + ".mjs"].find(item => existsSync(item) && lstatSync(item).isFile());
+              if (resolved) return this.lookup(this.pathScope(resolved), key);
+            }
+            throw new UsageError("Unsupported source path import: " + specifier + " (" + key + ")");
+          } });
+        }
+      }
+    }
+    return scope;
+  }
+  libraryOutputs(script: string): Map<string, string> {
+    const source = ts.createSourceFile(script, readFileSync(this.safe(script), "utf8"), ts.ScriptTarget.Latest, true);
+    const builders = new Set<string>();
+    for (const node of source.statements) if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text === "vite") {
+      const bindings = node.importClause?.namedBindings;
+      if (bindings && ts.isNamedImports(bindings)) for (const item of bindings.elements) {
+        if ((item.propertyName?.text ?? item.name.text) === "build") builders.add(item.name.text);
+      }
+    }
+    if (!builders.size) return new Map();
+    const scope = this.pathScope(script);
+    const property = (node: ts.Expression | undefined, name: string): ts.Expression | undefined => {
+      if (!node || !ts.isObjectLiteralExpression(node)) return;
+      const item = node.properties.find(item => ts.isPropertyAssignment(item)
+        && (ts.isIdentifier(item.name) || ts.isStringLiteralLike(item.name)) && item.name.text === name);
+      return item && ts.isPropertyAssignment(item) ? item.initializer : undefined;
+    };
+    const outputs = new Map<string, string>();
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && builders.has(node.expression.text)) {
+        const config = node.arguments[0];
+        const build = property(config, "build");
+        const lib = property(build, "lib");
+        const entry = property(lib, "entry"), fileName = property(lib, "fileName");
+        if (entry && fileName) {
+          const rootNode = property(config, "root"), outNode = property(build, "outDir"), formatNode = property(lib, "formats");
+          const root = this.safe(path.resolve(this.root, rootNode ? this.expression(rootNode, scope) : this.root));
+          const out = this.safe(path.resolve(root, outNode ? this.expression(outNode, scope) : "dist"));
+          const formats = formatNode ? this.expression(formatNode, scope) : ["es"];
+          if (!Array.isArray(formats)) throw this.unsupported(formatNode!);
+          const entries = this.expression(entry, scope);
+          if (!entries || typeof entries !== "object" && typeof entries !== "string") throw this.unsupported(entry);
+          const pairs: [string, string][] = typeof entries === "string" ? [[path.basename(entries, path.extname(entries)), entries]]
+            : Array.isArray(entries) ? entries.map(file => [path.basename(file, path.extname(file)), file]) : Object.entries(entries);
+          if (pairs.some(([, file]) => typeof file !== "string")) throw this.unsupported(entry);
+          const naming = this.expression(fileName, scope);
+          let packageType: unknown;
+          for (let directory = root; containsPath(this.root, directory); directory = path.dirname(directory)) {
+            const manifest = path.join(directory, "package.json");
+            if (existsSync(manifest)) { packageType = JSON.parse(this.read(manifest)).type; break; }
+            if (directory === this.root) break;
+          }
+          for (const format of formats) {
+            if (format !== "es" && format !== "esm") continue;
+            for (const [entryName, file] of pairs) {
+              const name = naming?.[callable] ? this.invoke(naming, [format, entryName])
+                : typeof naming === "string" ? naming + (packageType === "module" ? ".js" : ".mjs") : undefined;
+              if (typeof name !== "string" || !/\.[cm]?js$/i.test(name)) throw this.unsupported(fileName);
+              const output = this.safe(path.resolve(out, name));
+              if (!containsPath(out, output)) throw new UsageError("Library output leaves its declared directory: " + name);
+              const relative = path.relative(out, output).split(path.sep).join("/");
+              const input = this.safe(path.resolve(root, file));
+              if (!existsSync(input) || !lstatSync(input).isFile()) throw new UsageError("Source library entry does not exist: " + file);
+              if (outputs.has(relative) && outputs.get(relative) !== input) throw new UsageError("Ambiguous source library output: " + relative);
+              outputs.set(relative, input);
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    return outputs;
+  }
   load(file: string): Scope {
     this.safe(file);
     if (this.loaded.has(file)) return this.loaded.get(file)!;
@@ -270,6 +381,19 @@ class Reader {
     }
     return scope;
   }
+}
+
+export function detectLibraryOutputs(root: string): Map<string, string> {
+  const packageFile = path.join(root, "package.json");
+  if (!existsSync(packageFile)) return new Map();
+  let pkg;
+  try { pkg = JSON.parse(readFileSync(packageFile, "utf8")); } catch { return new Map(); }
+  const match = typeof pkg.scripts?.build === "string"
+    ? /^(?:bun|node)\s+(?:run\s+)?["']?([^"'\s]+\.[cm]?[jt]s)["']?(?:\s|$)/.exec(pkg.scripts.build.trim()) : null;
+  if (!match) return new Map();
+  const script = path.resolve(root, match[1]!);
+  if (!containsPath(root, script) || !existsSync(script)) return new Map();
+  return new Reader(root).libraryOutputs(script);
 }
 
 export function detectComposition(root: string): Composition | undefined {

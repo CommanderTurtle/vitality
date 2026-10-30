@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { detectComposition } from "../dist/composition.js";
+import { detectComposition, detectLibraryOutputs } from "../dist/composition.js";
 import { resolveSourceEntry } from "../dist/copy.js";
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -45,6 +45,7 @@ for (const [entry, output, format] of [['src/boot.ts', 'data/boot.js', 'iife'], 
  const result = await Bun.build({ entrypoints: [join(root, entry)], format, target: 'browser' })
  await Bun.write(join(stage, output), result.outputs[0]!)
 }
+
 let html = await Bun.file(join(stage, 'index.html')).text()
 html = html.replace('<head>', '<head><script src="./data/boot.js"></script>')
 await Bun.write(join(stage, 'index.html'), html)
@@ -53,6 +54,99 @@ await rename(stage, join(root, 'dist'))
 `);
   return source;
 }
+
+async function libraryFixture(context, name = 'problem.js', native = false) {
+  const source = await mkdtemp(path.join(os.tmpdir(), 'vitality-library café-'));
+  context.after(() => rm(source, { recursive: true, force: true }));
+  for (const dir of ['src', 'scripts', 'demo']) await mkdir(path.join(source, dir));
+  await writeFile(path.join(source, 'package.json'), JSON.stringify({name:'library-recipe',type:'module',scripts:{build:'bun scripts/build.mjs'}}));
+  await writeFile(path.join(source, 'scripts/paths.mjs'), `export const root = new URL('../', import.meta.url); export async function prepareModels() { throw Error('never execute preparation'); }`);
+  await writeFile(path.join(source, 'scripts/build.mjs'), `
+    import { build as bundle } from 'vite';
+    import { fileURLToPath } from 'node:url';
+    import { root, prepareModels } from './paths.mjs';
+    await prepareModels();
+    await bundle({ configFile: false, root: fileURLToPath(root), build: {
+      outDir: 'dist', lib: { entry: fileURLToPath(new URL('src/index.js', root)), formats: ['es'], fileName: () => ${JSON.stringify(name)} }
+    } });
+  `);
+  await writeFile(path.join(source, 'demo/index.html'), '<script type="module" src="./some.js"></script>');
+  await writeFile(path.join(source, 'demo/some.js'), `import { createWorker } from './${name}'; globalThis.libraryAnswer = createWorker();
+    globalThis.spawnLibrary = () => new Worker(new URL('./${name}', import.meta.url), {type:'module'});`);
+  await writeFile(path.join(source, 'src/index.js'), `import { answer } from './helper.js'; export function createWorker() { return answer; }
+    export function actualWorker() { return new Worker(new URL('./worker.js', import.meta.url), {type:'module'}); }`);
+  await writeFile(path.join(source, 'src/helper.js'), 'export const answer = 42;');
+  await writeFile(path.join(source, 'src/worker.js'), 'self.postMessage(42);');
+  if (native) {
+    await writeFile(path.join(source, 'index.html'), '<script type="module" src="./some.js"></script>');
+    await writeFile(path.join(source, 'some.js'), await readFile(path.join(source, 'demo/some.js')));
+    await writeFile(path.join(source, 'vite.config.js'), `export default {build:{target:'esnext',modulePreload:false}};`);
+  }
+  return source;
+}
+
+for (const [inline, noPublic] of [['n','n'], ['y','n'], ['y','y']]) {
+  for (const name of ['problem.js', 'renamed/problem.mjs']) {
+    test(`Vite library output aliases resolve from unbuilt source (${inline}/${noPublic}, ${name})`, {timeout:30_000}, async context => {
+      const source = await libraryFixture(context, name);
+      assert.equal(detectLibraryOutputs(source).get(name), path.join(source, 'src/index.js'));
+      assert.equal((await resolveSourceEntry(source)).relative, 'demo/index.html');
+      run(['dist/cli.js','give','-d',source,'-b','/nested/','--inline',inline,'--no-public',noPublic]);
+      const wrapper = path.join(source, 'mywrap');
+      const consumer = await readFile(path.join(wrapper, 'src/app/some.ts'), 'utf8');
+      assert.match(consumer, /from ["']\.\/__vitality_sources__\/src\/index\.ts/);
+      assert.doesNotMatch(consumer, /from ['"]\.\/problem\.js/);
+      run(['install','--ignore-scripts'],wrapper);
+      run(['run','--bun','build'],wrapper);
+      run(['-e', `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/nested/');await import('./dist/assets/index.js');if(globalThis.libraryAnswer!==42)throw Error('library alias failed');`],wrapper);
+      await assert.rejects(stat(path.join(source,'dist')));
+      assert.match(await readFile(path.join(source,'demo/some.js'),'utf8'), /createWorker/);
+    });
+  }
+}
+
+for (const noPublic of ['n', 'y']) {
+  test(`native Vite keeps source library aliases (no-public=${noPublic})`, {timeout:30_000}, async context => {
+    const source = await libraryFixture(context, 'problem.js', true);
+    run(['dist/cli.js','give','-d',source,'-b','/nested/','--inline','y','--no-public',noPublic]);
+    const wrapper = path.join(source,'mywrap');
+    assert.match(await readFile(path.join(wrapper,'some.js'),'utf8'), /from ["']\.\/src\/index\.js/);
+    run(['install','--ignore-scripts'],wrapper);
+    run(['run','--bun','build'],wrapper);
+    const html = await readFile(path.join(wrapper, 'dist/index.html'), 'utf8');
+    const entry = html.match(/<script\b[^>]*\bsrc=["']([^"']+)["']/)?.[1];
+    assert.ok(entry?.startsWith('/nested/assets/'));
+    run(['-e', `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/nested/');await import(${JSON.stringify('./dist/'+entry.slice('/nested/'.length))});if(globalThis.libraryAnswer!==42)throw Error('native library alias failed');`],wrapper);
+    await assert.rejects(stat(path.join(source,'dist')));
+  });
+}
+test('source library aliases preserve existing files and work beside a root HTML entry', async context => {
+  const source = await libraryFixture(context);
+  await writeFile(path.join(source, 'demo/problem.ts'), 'export const createWorker = () => 7;');
+  run(['dist/cli.js','give','-d',source,'--inline','n']);
+  const wrapper = path.join(source, 'mywrap');
+  assert.match(await readFile(path.join(wrapper, 'src/app/some.ts'), 'utf8'), /from ['"]\.\/problem\.ts/);
+  run(['-e', `await import('./src/app/some.ts');if(globalThis.libraryAnswer!==7)throw Error('real file was overridden');`],wrapper);
+  await writeFile(path.join(source, 'index.html'), '<script type="module" src="./some.js"></script>');
+  await writeFile(path.join(source, 'some.js'), await readFile(path.join(source, 'demo/some.js')));
+  run(['dist/cli.js','give','-d',source,'-o','root-wrap','--inline','n']);
+  const rootWrapper = path.join(source, 'root-wrap');
+  assert.match(await readFile(path.join(rootWrapper, 'src/app/some.ts'), 'utf8'), /from ['"]\.\/src\/index\.ts/);
+  await assert.rejects(stat(path.join(source, 'dist')));
+});
+
+test('library output discovery preserves Vite string-name semantics and rejects escaping aliases', async context => {
+  const source = await libraryFixture(context);
+  const script = path.join(source, 'scripts/build.mjs');
+  const original = await readFile(script, 'utf8');
+  await writeFile(script, original.replace("fileName: () => \"problem.js\"", "fileName: 'literal'"));
+  assert.equal(detectLibraryOutputs(source).get('literal.js'), path.join(source, 'src/index.js'));
+  await writeFile(script, original.replace("fileName: () => \"problem.js\"", "fileName: () => '../outside.js'"));
+  assert.throws(() => detectLibraryOutputs(source), /leaves its declared directory/);
+  await writeFile(script, original.replace("'src/index.js'", "'../../outside.js'"));
+  assert.throws(() => detectLibraryOutputs(source), /outside the project/);
+  await assert.rejects(stat(path.join(source, 'dist')));
+});
 
 test("composed TS sources become Vite inputs without executing the source builder", async context => {
   const source = await fixture(context);

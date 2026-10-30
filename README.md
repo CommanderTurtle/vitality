@@ -79,6 +79,12 @@ Project-local `fileURLToPath(new URL(..., import.meta.url))` paths are traced
 through staged renames; declared module filenames, including `.mjs`, keep their
 exact output URLs.
 
+Programmatic Vite library recipes also contribute their declared `build.lib.entry`
+and `fileName` mappings when an HTML entry is already present. A consumer's
+missing `./library.js` import resolves to that recipe's source entry in every
+wrapping mode. Existing source modules take precedence. Only the required path
+declarations are read; build commands and preparation callbacks stay unevaluated.
+
 The resulting `mywrap` uses ordinary TypeScript sources and Vite directly, with
 the same `--base` and `--inline` options. Local bootstraps and extensions become
 Vite module entries; existing URL-loaded vendor graphs keep their public paths.

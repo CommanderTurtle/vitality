@@ -16,10 +16,11 @@ function importSpecifier(node: ts.StringLiteralLike): boolean {
 // dependency closure instead of embedding them or copying the entire source tree.
 export async function publicRuntime(
   inventory: string[], reachable: Set<string>, sourceRoot: string, base: string, initial: Set<string>,
+  sourceNames?: ReadonlyMap<string, string>,
 ): Promise<{ files: Set<string>; modules: string[]; rewrite: (code: string, file: string) => string; rewriteJSON: (code: string, file: string) => string }> {
   const origin = "https://vitality.invalid/";
   const root = new URL(base && base !== "./" ? base : "/", origin);
-  const names = new Map(inventory.map(file => [web(path.relative(sourceRoot, file)), file]));
+  const names = new Map(inventory.map(file => [sourceNames?.get(file) ?? web(path.relative(sourceRoot, file)), file]));
   const namesByFile = new Map([...names].map(([name, file]) => [file, name]));
   const files = new Set(initial);
   const encode = (name: string) => name.split("/").map(encodeURIComponent).join("/");

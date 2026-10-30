@@ -1,5 +1,6 @@
 import { mkdir, readdir, readFile, writeFile, stat, cp } from "node:fs/promises";
 import path from "node:path";
+import { existsSync } from "node:fs";
 import ts from "typescript-parser";
 import { containsPath } from "./paths.js";
 import type { GiveOptions, ScaffoldReport } from "./types.js";
@@ -9,6 +10,37 @@ import { writeWrapperPackage, updateGitignore } from "./package-file.js";
 export async function copyNativeVite(options: GiveOptions, destination: string, configName: string): Promise<Omit<ScaffoldReport, "elapsedMilliseconds">> {
   const result = { copiedFiles: 0, copiedBytes: 0, excludedEntries: 0, skippedLinks: 0, pages: [] as string[] };
   const excluded = new Set([".git", "node_modules", "dist", "build", ".cache", ".vite", ".vitality", ".tmp", "coverage"]);
+  const aliases = new Map([...options.libraryOutputs ?? []].map(([name, file]) => [path.resolve(options.siteRoot, name), file]));
+  function bindLibraryReferences(file: string, code: string): string {
+    if (!aliases.size) return code;
+    const parsed = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true);
+    const edits: { start: number; end: number; text: string }[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isStringLiteralLike(node) && node.text.startsWith(".")) {
+        const parent = node.parent;
+        const module = ((ts.isImportDeclaration(parent) || ts.isExportDeclaration(parent)) && parent.moduleSpecifier === node)
+          || (ts.isCallExpression(parent) && parent.expression.kind === ts.SyntaxKind.ImportKeyword && parent.arguments[0] === node);
+        const url = ts.isNewExpression(parent) && parent.expression.getText(parsed) === "URL"
+          && parent.arguments?.[0] === node && parent.arguments[1]?.getText(parsed) === "import.meta.url";
+        if (module || url) {
+          const clean = node.text.split(/[?#]/)[0]!;
+          const requested = path.resolve(path.dirname(file), clean);
+          const alternatives = clean.endsWith(".js") ? [requested.slice(0, -3) + ".ts", requested.slice(0, -3) + ".tsx"]
+            : clean.endsWith(".mjs") ? [requested.slice(0, -4) + ".mts"] : clean.endsWith(".cjs") ? [requested.slice(0, -4) + ".cts"] : [];
+          const target = aliases.get(requested) ?? aliases.get(path.resolve(options.siteRoot, clean));
+          if (target && ![requested, ...alternatives].some(item => existsSync(item))) {
+            const relative = path.relative(path.dirname(file), target).split(path.sep).join("/");
+            edits.push({ start: node.getStart(parsed), end: node.end,
+              text: JSON.stringify((relative.startsWith(".") ? relative : "./" + relative) + node.text.slice(clean.length)) });
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(parsed);
+    for (const edit of edits.sort((a, b) => b.start - a.start)) code = code.slice(0, edit.start) + edit.text + code.slice(edit.end);
+    return code;
+  }
   async function walk(dir: string, relative = "") {
     for (const item of await readdir(dir, { withFileTypes: true })) {
       const source = path.join(dir, item.name);
@@ -23,14 +55,16 @@ export async function copyNativeVite(options: GiveOptions, destination: string, 
       } else if (item.isFile() && !/^\.env(?:\.|$)/i.test(item.name)) {
         const output = path.join(destination, name);
         await mkdir(path.dirname(output), { recursive: true });
-        await cp(source, output);
+        if (aliases.size && /\.(?:[cm]?[jt]sx?)$/i.test(source)) await writeFile(output, bindLibraryReferences(source, await readFile(source, "utf8")));
+        else await cp(source, output);
         result.copiedFiles++;
         result.copiedBytes += (await stat(source)).size;
       }
     }
   }
   await walk(options.source);
-  const config = await readFile(path.join(options.source, configName), "utf8");
+  const configFile = path.join(options.source, configName);
+  const config = bindLibraryReferences(configFile, await readFile(configFile, "utf8"));
   const parsed = ts.createSourceFile(configName, config, ts.ScriptTarget.Latest, true);
   const edits: {start: number; end: number; text: string}[] = [];
   for (const node of parsed.statements) if (options.noPublic && ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text === "vite-plugin-static-copy") {
