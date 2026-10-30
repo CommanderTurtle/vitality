@@ -8,7 +8,7 @@ import type { GiveOptions, ScaffoldReport } from "./types.js";
 import { copyNativeVite } from "./native-vite.js";
 
 export async function give(options: GiveOptions): Promise<ScaffoldReport> {
-  const nativeConfig = options.noPublic
+  const nativeConfig = options.inlineAssets
     ? (await readdir(options.source)).find(name => /^vite\.config\.[cm]?[jt]s$/i.test(name)) : undefined;
   const started = performance.now();
   const temporary = temporarySibling(options.source, options.output);
@@ -27,12 +27,13 @@ export async function give(options: GiveOptions): Promise<ScaffoldReport> {
       options.sourceIndex,
       options.output,
       temporary,
+      options.inlineAssets && !options.noPublic ? options.base : undefined,
     );
     await mkdir(path.join(temporary, "src"), { recursive: true });
     await Promise.all([
       writeFile(
         path.join(temporary, "vite.config.ts"),
-        "config" in copied ? String(copied.config) : renderViteConfig(options.base, options.inlineAssets, copied.pages),
+        "config" in copied ? String(copied.config) : renderViteConfig(options.base, options.inlineAssets, copied.pages, copied.runtimeModules),
         "utf8",
       ),
       writeFile(path.join(temporary, "tsconfig.json"), generatedTsconfig, "utf8"),

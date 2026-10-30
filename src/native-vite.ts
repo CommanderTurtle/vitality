@@ -33,7 +33,7 @@ export async function copyNativeVite(options: GiveOptions, destination: string, 
   const config = await readFile(path.join(options.source, configName), "utf8");
   const parsed = ts.createSourceFile(configName, config, ts.ScriptTarget.Latest, true);
   const edits: {start: number; end: number; text: string}[] = [];
-  for (const node of parsed.statements) if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text === "vite-plugin-static-copy") {
+  for (const node of parsed.statements) if (options.noPublic && ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text === "vite-plugin-static-copy") {
     edits.push({ start: node.moduleSpecifier.getStart(parsed), end: node.moduleSpecifier.end, text: '"./vitality-inline.ts"' });
   }
   let copiedConfig = config;
@@ -41,21 +41,33 @@ export async function copyNativeVite(options: GiveOptions, destination: string, 
   const original = "vite.original" + path.extname(configName);
   await writeFile(path.join(destination, original), copiedConfig);
   // Overwrite the copied entry config with an adapter; sourceRoot remains untouched.
-  await writeFile(path.join(destination, configName), `import sourceConfig from "./${original}";
+  await writeFile(path.join(destination, configName), options.noPublic ? `import sourceConfig from "./${original}";
 import { compactConfig } from "./vitality-inline.ts";
 export default async env => compactConfig(await (typeof sourceConfig === "function" ? sourceConfig(env) : sourceConfig), ${JSON.stringify(options.base)});
+` : `import sourceConfig from "./${original}";
+import { fileURLToPath } from "node:url";
+export default async env => {
+  const config = await (typeof sourceConfig === "function" ? sourceConfig(env) : sourceConfig);
+  return { ...config, base: ${JSON.stringify(options.base)}, build: {
+    ...config.build, outDir: fileURLToPath(new URL("./dist", import.meta.url)), emptyOutDir: true, assetsInlineLimit: Number.POSITIVE_INFINITY,
+  } };
+};
 `);
-  const helper = await readFile(new URL("./native-vite-plugin.js", import.meta.url), "utf8");
-  await writeFile(path.join(destination, "vitality-inline.ts"), helper.replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, ""));
+  if (options.noPublic) {
+    const helper = await readFile(new URL("./native-vite-plugin.js", import.meta.url), "utf8");
+    await writeFile(path.join(destination, "vitality-inline.ts"), helper.replace(/^\/\/[#@]\s*sourceMappingURL=.*$/gm, ""));
+  }
   await writeWrapperPackage(options.source, destination, options.base, true, 0, options.sourceEntry);
   const pkgPath = path.join(destination, "package.json");
   const pkg = JSON.parse(await readFile(pkgPath, "utf8"));
   const originalPackage = JSON.parse(await readFile(path.join(options.source, "package.json"), "utf8"));
   // Match the source's Vite major/plugins instead of downgrading its toolchain.
   pkg.devDependencies.vite = originalPackage.devDependencies?.vite ?? originalPackage.dependencies?.vite ?? pkg.devDependencies.vite;
-  pkg.devDependencies["typescript-parser"] = "npm:typescript@5.9.3";
-  pkg.devDependencies.tinyglobby = "^0.2.15";
-  pkg.vitality.noPublic = true;
+  if (options.noPublic) {
+    pkg.devDependencies["typescript-parser"] = "npm:typescript@5.9.3";
+    pkg.devDependencies.tinyglobby = "^0.2.15";
+  }
+  pkg.vitality.noPublic = Boolean(options.noPublic);
   pkg.vitality.nativeVite = true;
   pkg.vitality.generatedConfig = configName;
   pkg.vitality.sourceRoot = ".";

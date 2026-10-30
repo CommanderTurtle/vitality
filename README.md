@@ -182,6 +182,10 @@ behavior remains Vite's behavior: this limit does **not** embed `public/`.
 The n/n path uses the same content-hashed runtime asset names in the main and
 worker builds, so shared WASM, module sidecars, and images emit once.
 
+The y/n path also preserves an existing Vite project's source configuration,
+plugins, aliases, and public-directory rules. Static-copy plugins keep their
+normal output; the wrapper applies the selected base and imported-asset limit.
+
 When a reachable JSON manifest resolves sibling files by URL at runtime,
 Vitality places that minimal relational JSON graph in Vite's ordinary
 `public/` directory. This preserves browser URL semantics and the configured
@@ -189,6 +193,11 @@ base without turning the rest of the repository into public build output.
 Classic non-module scripts use the same path, with `%BASE_URL%` references in
 generated HTML. Static-host control files at the selected site root (`404.html`,
 `CNAME`, `.nojekyll`, `_headers`, and `_redirects`) are preserved there too.
+
+In y/n static-folder wraps, URL-loaded JS/MJS modules, workers, and their local
+dependencies retain their public paths. Explicit engine-directory URLs preserve
+that directory's files, including WASM. Runtime references follow the selected
+base; public module imports retain query strings and work with relative bases.
 
 ### No-public mode
 

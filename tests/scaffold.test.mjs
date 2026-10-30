@@ -63,7 +63,7 @@ test("give creates an uninstalled TypeScript/Vite source project", { timeout: 30
   await stat(path.join(wrapper, "src", "app", "nested", "nested.ts"));
   await stat(path.join(wrapper, "public", "runtime", "manifest", "index.json"));
   await stat(path.join(wrapper, "public", "runtime", "manifest", "child.json"));
-  await stat(path.join(wrapper, "src", "app", "runtime", "data.json"));
+  await stat(path.join(wrapper, "public", "runtime", "data.json"));
   await assert.rejects(stat(path.join(wrapper, ".env.private")));
   const convertedModule = await readFile(path.join(wrapper, "src", "app", "src", "main.ts"), "utf8");
   assert.match(convertedModule, /import\.meta\.env\.BASE_URL/u);
@@ -148,6 +148,40 @@ test("no-public also preserves ordinary source modules and relative JSON fetches
   run(process.execPath, ["run", "--bun", "build"], wrapper);
   assert.deepEqual(await allFiles(path.join(wrapper, "dist")), ["assets/index.css", "assets/index.js", "index.html"]);
   run(process.execPath, ["-e", `globalThis.window=globalThis;globalThis.location=new URL('https://example.test/nested/');await import('./dist/assets/index.js');if(globalThis.inlineAnswer!==42)throw Error('JSON graph failed');`], wrapper);
+});
+
+test("y/n preserves native async Vite configuration, public paths and asset plugins", async context => {
+  const source = await mkdtemp(path.join(os.tmpdir(), 'vitality-native-public-'));
+  context.after(() => rm(source, { recursive: true, force: true }));
+  await cp(path.join(fixtures, 'configured'), source, { recursive: true });
+  await mkdir(path.join(source, 'public/engines'), { recursive: true });
+  await writeFile(path.join(source, 'public/engines/model.wasm'), Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]));
+  const config = `export default async env => ({
+    root: 'app', publicDir: '../public', resolve: { alias: { '@helper': '/src/helper.mjs' } },
+    build: { target: 'esnext' }, plugins: [{name:'native-fixture',
+      transformIndexHtml(html) { return html + '<meta name="native-plugin" content="' + env.command + '">'; },
+      generateBundle() { this.emitFile({type:'asset',fileName:'engines/copied.data',source:'plugin payload'}); }
+    }]
+  });`;
+  await writeFile(path.join(source, 'vite.config.js'), config);
+  await writeFile(path.join(source, 'src/helper.mjs'), 'export const answer = 42;');
+  await writeFile(path.join(source, 'src/main.js'), `import { answer } from '@helper'; globalThis.answer = answer; globalThis.engine = new URL('/nested/engines/model.wasm', location.href).href;`);
+  await mkdir(path.join(source, 'app'));
+  await cp(path.join(source, 'index.html'), path.join(source, 'app/index.html'));
+  await cp(path.join(source, 'src'), path.join(source, 'app/src'), { recursive: true });
+  run(process.execPath, [cli, 'give', '-d', source, '-b', '/nested/', '--inline', 'y', '--no-public', 'n'], repository);
+  const wrapper = path.join(source, 'mywrap');
+  assert.equal(await readFile(path.join(wrapper, 'vite.original.js'), 'utf8'), config);
+  assert.equal(await readFile(path.join(source, 'vite.config.js'), 'utf8'), config);
+  await assert.rejects(stat(path.join(wrapper, 'vitality-inline.ts')));
+  const metadata = JSON.parse(await readFile(path.join(wrapper, 'package.json'), 'utf8')).vitality;
+  assert.equal(metadata.nativeVite, true);
+  assert.equal(metadata.noPublic, false);
+  run('bun', ['install', '--ignore-scripts'], wrapper);
+  run('bun', ['run', '--bun', 'build'], wrapper);
+  assert.match(await readFile(path.join(wrapper, 'dist/index.html'), 'utf8'), /name="native-plugin" content="build"/);
+  assert.equal(await readFile(path.join(wrapper, 'dist/engines/copied.data'), 'utf8'), 'plugin payload');
+  assert.deepEqual(await readFile(path.join(wrapper, 'dist/engines/model.wasm')), Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]));
 });
 
 test("native Vite runtime initializes before source modules on current stable Vite", { timeout: 30_000 }, async context => {

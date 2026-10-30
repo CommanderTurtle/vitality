@@ -1,4 +1,30 @@
-export function renderViteConfig(base: string, inlineAssets: boolean, pages: string[]): string {
+export function renderViteConfig(base: string, inlineAssets: boolean, pages: string[], runtimeModules: string[] = []): string {
+  const relativeBase = !base || base === "./";
+  const publicModules = runtimeModules.map(name => (relativeBase ? "/" : base) + name.split("/").map(encodeURIComponent).join("/"));
+  const paths = relativeBase && publicModules.length
+    ? `paths: id => ${JSON.stringify(publicModules)}.includes(id.split(/[?#]/)[0]) ? ".." + id : id,` : "";
+  const publicPlugin = publicModules.length ? `
+  plugins: [{
+    name: "vitality-public-module-paths", enforce: "pre",
+    configResolved(config) { publicModuleBuild = config.command === "build"; },
+    resolveId(id, importer) {
+      if (!publicModuleBuild || !importer || !id.startsWith(".") || publicAssetQuery.test(id)) return;
+      const clean = id.split(/[?#]/)[0];
+      const file = path.resolve(path.dirname(importer), decodeURIComponent(clean));
+      const index = publicModuleFiles.indexOf(file);
+      if (index >= 0) return { id: publicModuleURLs[index] + id.slice(clean.length), external: true };
+    },
+    transform: { order: "post", handler(code) {
+      if (publicModuleBuild) return;
+      // Vite's source-file URL becomes the original public URL in the browser.
+      return { code: code.replace(/(\\b(?:import\\s*(?:[^"'\x60]*?\\sfrom\\s*)?|export\\s+[^"'\x60]*?\\sfrom\\s*|import\\s*\\()\\s*)(["'])([^"']+)\\2/g,
+        (whole, prefix, quote, url) => {
+          const clean = url.split(/[?#]/)[0];
+          const index = publicSourceURLs.indexOf(clean);
+          return index < 0 || publicAssetQuery.test(url) ? whole : prefix + quote + publicModuleURLs[index] + url.slice(clean.length) + quote;
+        }), map: null };
+    } },
+  }],` : "";
   const inputEntries = ["index.html", ...pages];
   const input = Object.fromEntries(inputEntries.map((file, index) => [
     index === 0 ? "index" : `page-${index}`,
@@ -7,7 +33,7 @@ export function renderViteConfig(base: string, inlineAssets: boolean, pages: str
   const singlePageOutput = pages.length === 0
     ? `,
         output: {
-          codeSplitting: false,
+          ${paths ? paths + "\n          " : ""}codeSplitting: false,
           entryFileNames: "assets/index.js",
           assetFileNames(asset) {
             const names = asset.names ?? [];
@@ -16,18 +42,25 @@ export function renderViteConfig(base: string, inlineAssets: boolean, pages: str
               : "${inlineAssets ? "assets/[name][extname]" : "assets/[name]-[hash][extname]"}";
           },
         }`
-    : "";
+    : paths ? `, output: { ${paths} }` : "";
   return `import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const input = ${JSON.stringify(input, null, 2)};
+${publicModules.length ? `const publicModuleURLs = ${JSON.stringify(publicModules)};
+let publicModuleBuild = false;
+const publicAssetQuery = /[?&](?:raw|url|worker|sharedworker)(?:[=&]|$)/;
+const publicModuleFiles = ${JSON.stringify(runtimeModules)}.map(name => path.resolve(root, "public", name));
+const publicSourceURLs = ${JSON.stringify(runtimeModules.map(name => (relativeBase ? "/" : base) + "public/" + name.split("/").map(encodeURIComponent).join("/")))};
+` : ""}
 
 export default defineConfig({
   root,
   base: ${JSON.stringify(base)},
   publicDir: "public",
+  ${publicPlugin}
   build: {
     outDir: "dist",
     emptyOutDir: true,

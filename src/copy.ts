@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { UsageError } from "./args.js";
 import { containsPath } from "./paths.js";
+import { publicRuntime } from "./public-runtime.js";
 
 const excludedDirectoryNames = new Set([
   ".git", ".hg", ".svn", ".github", ".cache", ".tmp", ".vite", ".vitality", "node_modules",
@@ -43,6 +44,7 @@ export interface CopySummary {
   excludedEntries: number;
   skippedLinks: number;
   pages: string[];
+  runtimeModules?: string[];
 }
 
 interface SourceInventory {
@@ -467,6 +469,7 @@ function rootEntry(
     const target = resolveReference(sourceIndex, href, known, sourceRoot);
     const destination = target === undefined ? undefined : destinations.get(target);
     if (destination === undefined) return whole;
+    if (containsPath(publicRoot, destination)) return whole;
     let relative = webPath(path.relative(path.dirname(mainFile), destination));
     if (!relative.startsWith(".")) relative = `./${relative}`;
     imports.push(`import ${JSON.stringify(relative)};`);
@@ -478,6 +481,11 @@ function rootEntry(
     const target = resolveReference(sourceIndex, src, known, sourceRoot);
     const destination = target === undefined ? undefined : destinations.get(target);
     if (destination === undefined) return whole;
+    if (containsPath(publicRoot, destination)) {
+      const name = webPath(path.relative(publicRoot, destination));
+      imports.push(`await import(/* @vite-ignore */ new URL(import.meta.env.BASE_URL + ${JSON.stringify(name)}, globalThis.location.href).href);`);
+      return "";
+    }
     let relative = webPath(path.relative(path.dirname(mainFile), destination));
     if (!relative.startsWith(".")) relative = `./${relative}`;
     imports.push(`import ${JSON.stringify(relative)};`);
@@ -517,16 +525,20 @@ export async function copyProject(
   sourceIndex: string,
   output: string,
   temporary: string,
+  runtimeBase?: string,
 ): Promise<CopySummary> {
   const found = await inventory(sourceRoot, output, temporary);
   const known = new Set(found.files);
   const reachable = await discoverReachable(found.files, sourceIndex, sourceRoot);
-  const modules = await discoverModules(found.files, reachable, sourceRoot);
   const appRoot = path.join(temporary, "src", "app");
   const publicRoot = path.join(temporary, "public");
   const publicJson = await discoverPublicJson(found.files, reachable, sourceRoot);
   const classicScripts = await discoverClassicScripts(found.files, reachable, sourceRoot);
   const publicFiles = new Set([...publicJson, ...classicScripts]);
+  const runtime = runtimeBase === undefined ? undefined
+    : await publicRuntime(found.files, reachable, sourceRoot, runtimeBase, publicFiles);
+  if (runtime) for (const file of runtime.files) publicFiles.add(file);
+  const modules = await discoverModules(found.files, reachable, sourceRoot);
   for (const file of found.files) {
     if (path.dirname(file) === sourceRoot && deploymentPublicNames.has(path.basename(file))) {
       publicFiles.add(file);
@@ -552,11 +564,12 @@ export async function copyProject(
     if (destination === undefined) continue;
     await mkdir(path.dirname(destination), { recursive: true });
     if (publicFiles.has(file)) {
-      await writeFile(destination, await readFile(file));
+      const bytes = await readFile(file);
+      await writeFile(destination, runtime && /\.json$/i.test(file) ? runtime.rewriteJSON(bytes.toString("utf8"), file) : bytes);
     } else if (isTextFile(file)) {
       const sourceText = await readFile(file, "utf8");
       const rewritten = rewriteLocalReferences(
-        sourceText, file, destination, known, destinations, sourceRoot, publicRoot,
+        runtime ? runtime.rewrite(sourceText, file) : sourceText, file, destination, known, destinations, sourceRoot, publicRoot,
       );
       await writeFile(destination, rewritten, "utf8");
     } else {
@@ -588,6 +601,7 @@ export async function copyProject(
     copiedBytes,
     excludedEntries: found.excludedEntries,
     skippedLinks: found.skippedLinks,
+    ...(runtime ? { runtimeModules: runtime.modules } : {}),
     pages: [...destinations.entries()]
       .filter(([sourceFile, destination]) => (
         /\.html?$/iu.test(sourceFile) && !containsPath(publicRoot, destination)
