@@ -13,7 +13,7 @@ export function renderViteConfig(base: string, inlineAssets: boolean, pages: str
             const names = asset.names ?? [];
             return names.some((name) => name.endsWith(".css"))
               ? "assets/index.css"
-              : "assets/[name][extname]";
+              : "${inlineAssets ? "assets/[name][extname]" : "assets/[name]-[hash][extname]"}";
           },
         }`
     : "";

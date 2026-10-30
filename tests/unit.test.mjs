@@ -4,6 +4,7 @@ import path from "node:path";
 import { parseArguments, parseBooleanWord, UsageError } from "../dist/args.js";
 import { normalizeBase } from "../dist/base.js";
 import { containsPath } from "../dist/paths.js";
+import { renderViteConfig } from "../dist/templates.js";
 
 test("parses the explicit give contract and literal path values", () => {
   const parsed = parseArguments([
@@ -37,4 +38,12 @@ test("path containment is segment-aware", () => {
   const root = path.resolve("alpha");
   assert.equal(containsPath(root, path.join(root, "child")), true);
   assert.equal(containsPath(root, path.resolve("alphabet")), false);
+});
+
+test("only non-inline output adopts the worker asset naming policy", () => {
+  const normal = renderViteConfig('/site/', false, []);
+  assert.match(normal, /assets\/\[name\]-\[hash\]\[extname\]/);
+  const inline = renderViteConfig('/site/', true, []);
+  assert.match(inline, /assets\/\[name\]\[extname\]/);
+  assert.doesNotMatch(inline, /assets\/\[name\]-\[hash\]\[extname\]/);
 });

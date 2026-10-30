@@ -207,6 +207,41 @@ test("give promotes a unique shallowest nested index as the site root", async (c
   ]);
 });
 
+test("n/n shares emitted runtime assets between main and worker builds", async context => {
+  const source = await mkdtemp(path.join(os.tmpdir(), 'vitality-nn-shared-'));
+  context.after(() => rm(source, { recursive: true, force: true }));
+  await mkdir(path.join(source, 'src'));
+  await writeFile(path.join(source, 'index.html'), '<script type="module" src="./src/main.js"></script>');
+  const wasm = Buffer.concat([Buffer.from([0, 97, 115, 109, 1, 0, 0, 0, 0, 0x81, 0x40, 0]), Buffer.alloc(8192, 42)]);
+  assert.ok(WebAssembly.validate(wasm));
+  const runtime = '/* shared runtime ' + 'x'.repeat(8192) + ' */\nexport const runtime = "shared";\n';
+  const image = Buffer.alloc(8192, 43);
+  await writeFile(path.join(source, 'src/language.wasm'), wasm);
+  await writeFile(path.join(source, 'src/runtime.mjs'), runtime);
+  await writeFile(path.join(source, 'src/image.png'), image);
+  const urls = `globalThis.sharedURLs = [new URL('./language.wasm', import.meta.url).href,new URL('./runtime.mjs', import.meta.url).href,new URL('./image.png', import.meta.url).href];`;
+  await writeFile(path.join(source, 'src/main.js'), urls + `\nnew Worker(new URL('./worker.js', import.meta.url), {type:'module'});`);
+  await writeFile(path.join(source, 'src/worker.js'), urls);
+  run(process.execPath, [cli, 'give', '-d', source, '-b', '/nested/', '--inline', 'n', '--no-public', 'n'], repository);
+  const wrapper = path.join(source, 'mywrap');
+  run('bun', ['install', '--ignore-scripts'], wrapper);
+  run('bun', ['run', '--bun', 'build'], wrapper);
+  const files = await allFiles(path.join(wrapper, 'dist'));
+  for (const [extension, bytes] of [['wasm', wasm], ['mjs', Buffer.from(runtime)], ['png', image]]) {
+    const copies = [];
+    for (const name of files.filter(file => file.endsWith('.' + extension))) {
+      if ((await readFile(path.join(wrapper, 'dist', name))).equals(bytes)) copies.push(name);
+    }
+    assert.equal(copies.length, 1, 'Duplicate runtime asset: ' + copies.join(', '));
+    const main = await readFile(path.join(wrapper, 'dist/assets/index.js'), 'utf8');
+    const workerName = files.find(name => /\/worker-[^/]+\.js$/.test(name));
+    assert.ok(workerName);
+    const worker = await readFile(path.join(wrapper, 'dist', workerName), 'utf8');
+    assert.ok(main.includes(path.posix.basename(copies[0])));
+    assert.ok(worker.includes(path.posix.basename(copies[0])));
+  }
+});
+
 test("give refuses to guess between equally shallow nested entries", async (context) => {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "vitality-ambiguous-root-"));
   context.after(() => rm(temporaryRoot, { recursive: true, force: true }));

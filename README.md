@@ -179,6 +179,8 @@ assetsInlineLimit: Number.POSITIVE_INFINITY
 
 Answering No leaves Vite's default threshold. In normal mode, imported-asset
 behavior remains Vite's behavior: this limit does **not** embed `public/`.
+The n/n path uses the same content-hashed runtime asset names in the main and
+worker builds, so shared WASM, module sidecars, and images emit once.
 
 When a reachable JSON manifest resolves sibling files by URL at runtime,
 Vitality places that minimal relational JSON graph in Vite's ordinary
