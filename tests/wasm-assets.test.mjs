@@ -1,12 +1,14 @@
 import { test } from "bun:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { embeddedAssets, normalizeInlineScript } from "../dist/embedded-assets-plugin.js";
 import { createHash } from "node:crypto";
 import { compactConfig, viteStaticCopy } from "../dist/native-vite-plugin.js";
-import { binaryFile, engineAsset, engineFileName } from "../dist/asset-policy.js";
+import { binaryFile, engineAsset, engineFileName, claimAsset } from "../dist/asset-policy.js";
+import { embedPublicFiles } from "../dist/no-public.js";
+import { build } from "vite";
 
 const call = (hook, context, ...args) => (typeof hook === "function" ? hook : hook.handler).call(context, ...args);
 const wasm = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
@@ -72,6 +74,67 @@ function context() {
   const emitted = [];
   return { emitted, emitFile: file => (emitted.push(file), String(emitted.length)), addWatchFile() {}, info() {}, error(message) { throw new Error(message); } };
 }
+
+test("compact emission compares bytes across collectors and compiler-owned sidecars", async () => {
+  const sources = new Map();
+  assert.equal(claimAsset(sources, 'same.bin', 'same'), true);
+  assert.equal(claimAsset(sources, 'same.bin', Buffer.from('same')), false);
+  const padded = Buffer.from('!same!');
+  assert.equal(claimAsset(sources, 'same.bin', padded.subarray(1, 5)), false);
+  assert.throws(() => claimAsset(sources, 'same.bin', Buffer.from('else')), /Conflicting emitted asset bytes: same.bin/);
+
+  const root = await mkdtemp(path.join(os.tmpdir(), 'vitality-emission-ownership-'));
+  try {
+    await mkdir(path.join(root, 'public'));
+    await writeFile(path.join(root, 'public/model.wasm'), wasm);
+    const config = compactConfig({root}, '/site/'), plugin = config.plugins[0];
+    const ctx = context(), name = engineFileName('model.wasm', wasm);
+    await call(plugin.buildStart, ctx);
+    const bundle = source => ({'assets/index-abcd.js':{type:'chunk',isEntry:true,code:'const assets="__VITALITY_NATIVE_ASSETS__";'},[name]:{type:'asset',fileName:name,source}});
+    call(plugin.generateBundle, ctx, {}, bundle(new Uint8Array(wasm)));
+    assert.equal(ctx.emitted.length, 0, 'compiler-owned identical bytes are reused');
+    assert.throws(() => call(plugin.generateBundle, ctx, {}, bundle(Buffer.from('wrong'))), /Conflicting emitted asset bytes/);
+
+    await mkdir(path.join(root, 'src'));
+    await writeFile(path.join(root, 'src/embedded-files.json'), JSON.stringify({'model.wasm':'public/model.wasm'}));
+    await writeFile(path.join(root, 'src/embedded-scripts.json'), '{}');
+    const embedded = embeddedAssets(root), embeddedContext = context();
+    call(embedded.configResolved, embeddedContext, {base:'/site/'});
+    call(embedded.buildStart, embeddedContext);
+    await call(embedded.load, embeddedContext, '\0vitality-assets');
+    await call(embedded.generateBundle, embeddedContext, {}, {[name]:{type:'asset',fileName:name,source:wasm,names:[]}});
+    assert.equal(embeddedContext.emitted.length, 1);
+    await assert.rejects(call(embedded.generateBundle, embeddedContext, {}, {[name]:{type:'asset',fileName:name,source:Buffer.from('wrong'),names:[]}}), /Conflicting emitted asset bytes/);
+  } finally { await rm(root, {recursive:true,force:true}); }
+});
+
+test("copied URL-script aliases keep one browser identity and stay out of the main graph", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'vitality-script-identities-'));
+  try {
+    await mkdir(path.join(root, 'src/app/vendor'), {recursive:true});
+    await writeFile(path.join(root, 'package.json'), JSON.stringify({type:'module',vitality:{}}));
+    await writeFile(path.join(root, 'index.html'), '<script type="module" src="/src/main.ts"></script>');
+    await writeFile(path.join(root, 'src/main.ts'), 'import "./app/main.ts";');
+    await writeFile(path.join(root, 'src/app/main.ts'), 'globalThis.parserURL=()=>new URL("./vendor/parser.js",import.meta.url);globalThis.workerURL=()=>new Worker(new URL("./vendor/worker.js",import.meta.url),{type:"module"});');
+    await writeFile(path.join(root, 'src/app/vendor/parser.js'), 'export function parse(){return eval("PARSER_BODY_MUST_STAY_IN_SCRIPT");}');
+    await writeFile(path.join(root, 'src/app/vendor/worker.js'), 'self.onmessage=()=>self.postMessage("WORKER_BODY_MUST_STAY_IN_SCRIPT");export {};');
+    await embedPublicFiles(root, '/site/', [], root, undefined, new Map([['src/app/vendor/parser.js','vendor/renamed.mjs']]));
+    const scripts = JSON.parse(await readFile(path.join(root, 'src/embedded-scripts.json'), 'utf8'));
+    assert.deepEqual(Object.keys(scripts).sort(), ['vendor/renamed.mjs','vendor/worker.js']);
+    const runtime = await readFile(path.join(root, 'src/inline-runtime.ts'), 'utf8');
+    assert.ok(!runtime.includes('import("./app/vendor/parser.js")'));
+    assert.ok(!runtime.includes('import("./app/vendor/worker.js")'));
+    assert.ok(runtime.includes('"vendor/parser.js": () => import(/* @vite-ignore */ globalThis.__vitalityEmbedded.script("vendor/renamed.mjs"))'));
+    // Windows temp paths can use an 8.3 user alias; match Vite's real input root.
+    const buildRoot = await realpath(root);
+    const result = await build({root:buildRoot,base:'/site/',configFile:false,publicDir:false,logLevel:'silent',plugins:[embeddedAssets(buildRoot)],build:{write:false,target:'esnext',modulePreload:false,cssCodeSplit:false,rolldownOptions:{input:path.join(buildRoot,'index.html'),output:{codeSplitting:false,entryFileNames:'assets/index.js',assetFileNames:'assets/[name][extname]'}}}});
+    const entry = result.output.find(item=>item.type==='chunk');
+    assert.ok(entry);
+    assert.ok(!entry.code.includes('eval('));
+    assert.ok(!entry.code.includes('PARSER_BODY_MUST_STAY_IN_SCRIPT'));
+    assert.ok(!entry.code.includes('WORKER_BODY_MUST_STAY_IN_SCRIPT'));
+  } finally { await rm(root, {recursive:true,force:true}); }
+});
 
 test("static wrapper emits unchanged, hashed WASM and rewrites both aliases", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "vitality-wasm-"));

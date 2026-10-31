@@ -30,3 +30,21 @@ export function engineFileName(name: string, bytes: string | Uint8Array): string
   const stem = path.basename(name, suffix).replace(/[^\w.-]/g, "-");
   return `assets/${stem}-${createHash("sha256").update(bytes).digest("hex").slice(0, 16)}${suffix}`;
 }
+
+// A hash-derived name is a claim, not proof that another producer supplied the
+// same bytes. Compact collectors and compiler/worker graphs reconcile by bytes
+// before deduplicating; a real conflict must never become last-writer-wins.
+export function sameAssetSource(left: string | Uint8Array, right: string | Uint8Array): boolean {
+  const bytes = (value: string | Uint8Array) => typeof value === "string" ? Buffer.from(value)
+    : Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  return bytes(left).equals(bytes(right));
+}
+export function claimAsset(assets: Map<string, string | Uint8Array>, name: string, source: string | Uint8Array): boolean {
+  const previous = assets.get(name);
+  if (previous !== undefined) {
+    if (!sameAssetSource(previous, source)) throw new Error("Conflicting emitted asset bytes: " + name);
+    return false;
+  }
+  assets.set(name, source);
+  return true;
+}

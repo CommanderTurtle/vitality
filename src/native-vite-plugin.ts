@@ -4,7 +4,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import ts from "typescript-parser";
 import { glob } from "tinyglobby";
 import type { Plugin, UserConfig } from "vite";
-import { binaryAssetGlobs, binaryFile, engineAsset, engineFileName } from "./asset-policy.js";
+import { binaryAssetGlobs, binaryFile, engineAsset, engineFileName, claimAsset, sameAssetSource } from "./asset-policy.js";
 
 type CopyTarget = { src: string | string[]; dest: string; rename?: string | Function; transform?: Function | { encoding: BufferEncoding | "buffer"; handler: Function } };
 type CopyOptions = { targets: CopyTarget[]; structured?: boolean };
@@ -91,10 +91,10 @@ export function compactConfig(source: UserConfig, base: string, layout: NativeLa
     });
     return declarations.length ? `(()=>{const ${declarations.join(",")};return {${fields.join(",")}}})()` : "{}";
   }
-  const emitted = new Map<string, Buffer>();
+  const emitted = new Map<string, string | Uint8Array>();
   function emitEngine(bytes: Buffer, name: string): string {
     const filename = engineFileName(name, bytes);
-    emitted.set(filename, bytes);
+    claimAsset(emitted, filename, bytes);
     return base + filename;
   }
   const contentNames = new Map<string, string>();
@@ -265,7 +265,14 @@ export function compactConfig(source: UserConfig, base: string, layout: NativeLa
       return createHash("sha256").update(assetPayload()).digest("hex");
     },
     generateBundle: { order: "post", handler(_output, bundle) {
-      for (const [fileName, source] of emitted) this.emitFile({ type: "asset", fileName, source });
+      for (const [fileName, source] of emitted) {
+        const previous = bundle[fileName];
+        // Imports, workers and copied resources may all own the same sidecar.
+        // Reuse identical output, and fail explicitly on conflicting bytes.
+        if (previous) {
+          if (previous.type !== "asset" || !sameAssetSource(previous.source, source)) this.error("Conflicting emitted asset bytes: " + fileName);
+        } else this.emitFile({ type: "asset", fileName, source });
+      }
       const extra = Object.keys(bundle).filter(name => !/^(?:index\.html|assets\/[^/]+-[\w-]+\.[\w.]+)$/.test(name));
       if (extra.length) this.error("No-public emitted unsupported extra files: " + extra.join(", "));
       const entries = Object.values(bundle).filter(item => item.type === "chunk" && item.isEntry);

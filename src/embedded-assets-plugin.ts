@@ -2,7 +2,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { build, type Plugin } from "vite";
-import { binaryAssetGlobs, binaryAsset, binaryFile, engineAsset, engineFileName } from "./asset-policy.js";
+import { binaryAssetGlobs, binaryAsset, binaryFile, engineAsset, engineFileName, claimAsset, sameAssetSource } from "./asset-policy.js";
 
 // Copied into opt-in wrappers. This runs during the user's Vite command, never give.
 export interface EmbeddedPage {
@@ -36,11 +36,11 @@ export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selecte
   let base = "/";
   const cache = new Map<string, string>();
   const active = new Set<string>();
-  const emitted = new Set<string>();
-  let emit: (fileName: string, source: Buffer) => void;
+  const emitted = new Map<string, string | Uint8Array>();
+  let emit: (fileName: string, source: string | Uint8Array) => void;
   function engineURL(name: string, bytes: Buffer): string {
     const fileName = engineFileName(name, bytes);
-    if (!emitted.has(fileName)) { emit(fileName, bytes); emitted.add(fileName); }
+    emit(fileName, bytes);
     return base + fileName;
   }
   const builtURL = (filename: string, context: { hostType: string }) => context.hostType === "js" && engineAsset(filename)
@@ -109,7 +109,7 @@ export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selecte
     configResolved(config) { base = config.base; },
     buildStart() {
       cache.clear(); active.clear(); emitted.clear();
-      emit = (fileName, source) => { this.emitFile({ type: "asset", fileName, source }); };
+      emit = (fileName, source) => { if (claimAsset(emitted, fileName, source)) this.emitFile({ type: "asset", fileName, source }); };
       for (const file of Object.values(files)) this.addWatchFile(path.resolve(root, file));
     },
     handleHotUpdate() { cache.clear(); active.clear(); },
@@ -144,9 +144,7 @@ export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selecte
         if (chunks.length !== 1 || outputs.some(item => item.type === "asset" && !engineAsset(item.fileName))) {
           this.error("URL script needs additional output; cannot embed safely: " + name);
         }
-        for (const item of outputs) if (item.type === "asset" && !emitted.has(item.fileName)) {
-          this.emitFile({ type: "asset", fileName: item.fileName, source: item.source }); emitted.add(item.fileName);
-        }
+        for (const item of outputs) if (item.type === "asset") emit(item.fileName, item.source);
         scriptData[name] = Buffer.from(chunks[0]!.code).toString("base64");
       }
       // Original and copied paths can address the same binary; store its bytes once.
@@ -170,8 +168,13 @@ export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selecte
     generateBundle: { order: "post", async handler(_options, bundle) {
       // Compiler-discovered sidecars use the same naming/byte policy as the
       // manifest; accept those too, without accepting arbitrary loose output.
-      for (const item of Object.values(bundle)) if (item.type === "asset" && binaryAsset(item.fileName)
-        && item.names.some(name => engineFileName(name, item.source) === item.fileName)) emitted.add(item.fileName);
+      for (const item of Object.values(bundle)) {
+        if (emitted.has(item.fileName)) {
+          if (item.type !== "asset") this.error("Engine asset conflicts with an output chunk: " + item.fileName);
+          claimAsset(emitted, item.fileName, item.source);
+        } else if (item.type === "asset" && binaryAsset(item.fileName)
+          && item.names.some(name => engineFileName(name, item.source) === item.fileName)) claimAsset(emitted, item.fileName, item.source);
+      }
       const unexpected = Object.keys(bundle).filter(name => {
         if (name.endsWith(".html") || emitted.has(name)) return false;
         return name !== "assets/index.js" && name !== "assets/index.css";
@@ -206,7 +209,12 @@ export function embeddedAssets(root: string, pages: EmbeddedPage[] = [], selecte
           if (item.fileName === "assets/index.css") {
             const css = Buffer.from(item.source).toString("base64");
             html = html.replace(/<\/head\s*>/i, () => '<link rel="stylesheet" href="data:text/css;base64,' + css + '"></head>');
-          } else if (!bundle[item.fileName]) this.emitFile({ type: "asset", fileName: item.fileName, source: item.source });
+          } else {
+            const previous = bundle[item.fileName];
+            if (previous && (previous.type !== "asset" || !sameAssetSource(previous.source, item.source))) this.error("Conflicting emitted asset bytes: " + item.fileName);
+            if (previous) claimAsset(emitted, item.fileName, item.source);
+            else emit(item.fileName, item.source);
+          }
         }
         this.emitFile({ type: "asset", fileName: page.name, source: html });
       }

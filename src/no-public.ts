@@ -27,6 +27,9 @@ export async function embedPublicFiles(root: string, base: string, pages: string
   const dynamicModules = new Set<string>();
   const assets: Record<string, string> = {};
   const originalNames = new Map<string, string>();
+  // A module's copied location, URL identity, and URL-resolution base are
+  // different contracts. Library helpers may share a base, but never an identity.
+  const moduleNames = new Map<string, string>();
   const files = new Map<string, string>();
   const pageNames = new Set<string>(pages);
   for (const [name, item] of plan?.files ?? []) if (name !== "index.html" && /\.html$/i.test(name) && "file" in item) pageNames.add(name);
@@ -36,7 +39,7 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     const dest = "src/embedded/" + name;
     files.set(name, dest);
     if (nonRuntime.test(name)) continue;
-    if (moduleFile.test(name)) { modules.set(name, dest); originalNames.set(dest, name); dynamicModules.add(name); }
+    if (moduleFile.test(name)) { modules.set(name, dest); originalNames.set(dest, name); moduleNames.set(dest, name); dynamicModules.add(name); }
     else assets[name] = dest;
   }
   if (publicFiles.length) await rename(path.join(root, "public"), path.join(root, "src/embedded"));
@@ -52,6 +55,7 @@ export async function embedPublicFiles(root: string, base: string, pages: string
       modules.set(dest, dest);
       const jsName = file.replace(/\.mts$/, ".mjs").replace(/\.tsx$/, ".jsx").replace(/\.ts$/, ".js");
       if (!modules.has(jsName)) modules.set(jsName, dest);
+      moduleNames.set(dest, modules.get(jsName) === dest ? jsName : file);
       // An already-built site can discover modules through JSON/API manifests,
       // not just import statements (e.g. ComfyUI's /extensions response).
       // Retain their original URL identities in the lazy runtime resolver too.
@@ -66,11 +70,13 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     const source = web(path.relative(sourceRoot, item.module)).replace(/\.js$/i, ".ts").replace(/\.mjs$/i, ".mts").replace(/\.jsx$/i, ".tsx");
     if (!appFiles.includes(source)) throw new UsageError("Cannot map source module for no-public output: " + name);
     modules.set(name, "src/app/" + source);
+    moduleNames.set("src/app/" + source, name);
     dynamicModules.add(name);
     originalNames.set("src/app/" + source, name);
   }
   for (const [file, name] of moduleOrigins ?? []) {
     if (!modules.has(name)) modules.set(name, file);
+    if (modules.get(name) === file) moduleNames.set(file, name);
     dynamicModules.add(name);
     originalNames.set(file, name);
   }
@@ -80,7 +86,12 @@ export async function embedPublicFiles(root: string, base: string, pages: string
     const clean = value.split(/[?#]/)[0] ?? "";
     const rootName = base && clean.startsWith(base) ? clean.slice(base.length) : clean.replace(/^\//, "");
     const relative = path.posix.normalize(path.posix.join(path.posix.dirname(from), clean));
-    return [clean.startsWith("/") ? rootName : relative, rootName].find(name => files.has(name) || modules.has(name));
+    const found = [clean.startsWith("/") ? rootName : relative, rootName].find(name => files.has(name) || modules.has(name));
+    // src/app aliases resolve physical imports, not additional browser scripts.
+    // Returning the alias here used to bundle one script into the Blob registry
+    // and again into the main graph under its original URL (including eval code).
+    const module = found === undefined ? undefined : modules.get(found);
+    return module ? moduleNames.get(module) ?? found : found;
   };
   const scriptHashes: string[] = [];
   let html = await readFile(path.join(root, "index.html"), "utf8");
@@ -213,7 +224,15 @@ export async function embedPublicFiles(root: string, base: string, pages: string
   await writeFile(path.join(root, "src/embedded-files.json"), JSON.stringify(assets, null, 2) + "\n");
   await writeFile(path.join(root, "src/embedded-scripts.json"), JSON.stringify(scriptURLs, null, 2) + "\n");
   await writeFile(path.join(root, "src/embedded-classic.json"), JSON.stringify(classicScripts, null, 2) + "\n");
-  const moduleLoaders = (from = "src") => [...modules].filter(([name]) => dynamicModules.has(name) && !Object.hasOwn(scriptURLs, name)).map(([name, file]) => `${JSON.stringify(name)}: () => import(${JSON.stringify("./" + path.posix.relative(from, file))})`).join(",\n");
+  const urlScripts = new Map(Object.entries(scriptURLs).map(([name, file]) => [file, name]));
+  const moduleLoaders = (from = "src") => [...modules].filter(([name]) => dynamicModules.has(name) && !Object.hasOwn(scriptURLs, name)).map(([name, file]) => {
+    // Keep every declared URL alias available, but let one owner supply its
+    // script. An alias must not pull the same vendor/worker back into main JS.
+    const script = urlScripts.get(file);
+    const load = script === undefined ? `import(${JSON.stringify("./" + path.posix.relative(from, file))})`
+      : `import(/* @vite-ignore */ globalThis.__vitalityEmbedded.script(${JSON.stringify(script)}))`;
+    return `${JSON.stringify(name)}: () => ${load}`;
+  }).join(",\n");
   const loaders = moduleLoaders();
   await writeFile(path.join(root, "src/inline-runtime.ts"), runtimeSource(loaders));
   const main = path.join(root, "src/main.ts");
